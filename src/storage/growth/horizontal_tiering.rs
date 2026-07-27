@@ -175,12 +175,9 @@ impl GrowthScheme for HorizontalTiering {
                 for counter in self.counters[..=level].iter_mut() {
                     *counter = reset_to;
                 }
-                return Some(CompactionRequest {
-                    level,
-                    // As with horizontal-leveling, the counters measure
-                    // whole-level merges.
-                    granularity: Granularity::Full,
-                });
+                // As with horizontal-leveling, the counters measure whole-level
+                // merges.
+                return Some(CompactionRequest::single(level, Granularity::Full));
             }
         }
         None
@@ -211,7 +208,7 @@ mod tests {
             scheme.note_flush();
             while let Some(request) = scheme.next_compaction(&tree) {
                 assert_eq!(request.granularity, Granularity::Full);
-                if request.level == 0 {
+                if request.first_level == 0 {
                     fired.push(flush);
                 }
             }
@@ -258,7 +255,7 @@ mod tests {
         assert_eq!(scheme.counters(), &[1, 3], "two flushes consumed two counts");
 
         scheme.note_flush();
-        assert_eq!(scheme.next_compaction(&tree).map(|r| r.level), Some(0));
+        assert_eq!(scheme.next_compaction(&tree).map(|r| r.first_level), Some(0));
         assert_eq!(
             scheme.counters(),
             &[2, 2],
@@ -268,7 +265,7 @@ mod tests {
         scheme.note_flush();
         assert_eq!(scheme.next_compaction(&tree), None);
         scheme.note_flush();
-        assert_eq!(scheme.next_compaction(&tree).map(|r| r.level), Some(0));
+        assert_eq!(scheme.next_compaction(&tree).map(|r| r.first_level), Some(0));
         assert_eq!(scheme.counters(), &[1, 1]);
     }
 
@@ -311,7 +308,7 @@ mod tests {
         for flush in 1..=21 {
             leveling.note_flush();
             while let Some(request) = leveling.next_compaction(&tree) {
-                if request.level == 0 {
+                if request.first_level == 0 {
                     leveling_fired.push(flush);
                 }
             }
@@ -352,7 +349,7 @@ mod tests {
         for _ in 0..200 {
             scheme.note_flush();
             while let Some(request) = scheme.next_compaction(&tree) {
-                assert!(request.level < 2);
+                assert!(request.first_level < 2);
             }
         }
 
@@ -375,9 +372,9 @@ mod tests {
             scheme.note_flush();
             while let Some(request) = scheme.next_compaction(&tree) {
                 assert!(
-                    request.level < 2,
+                    request.first_level < 2,
                     "level {} is the deepest and cannot compact",
-                    request.level
+                    request.first_level
                 );
             }
         }

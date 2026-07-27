@@ -11,15 +11,17 @@ are reported rather than hidden.
 
 ## Status
 
-Phase 0 is in progress. **Nothing below is claimed until it is implemented,
-tested, and measured** — see [Reported numbers](#reported-numbers).
+**Nothing below is claimed until it is implemented, tested, and measured** — see
+[Reported numbers](#reported-numbers).
 
 | Phase | Component | State |
 |---|---|---|
 | 0 | Memtable, WAL, SSTable, bloom filter, merge iterator, manifest, LSM tree | done |
-| 0 | Growth schemes: vertical, horizontal | done |
-| 0 | Compaction: leveling, tiering | done |
-| 1 | Vertiorizon growth scheme (paper 01) | not started |
+| 0 | Growth schemes: vertical, horizontal (Algorithm 1) | done |
+| 0 | Merge policies: leveling, tiering; partial compaction | done |
+| 1 | Horizontal-tiering (paper 01, Algorithm 2 — their contribution) | done |
+| 1 | **Vertiorizon** (paper 01 §5): two-part layout, `T′ = T/√2`, dynamic `n` | done |
+| 1 | Vertiorizon self-tuning (§5.2), skew adaptation (§5.3), dynamic Bloom layout | **not reproduced** — out of scope, see below |
 | 2 | EcoTune compaction policy (paper 02) | not started |
 | 3 | Storage benchmarks across both axes | not started |
 | 4 | Brute-force exact k-NN baseline | not started |
@@ -27,7 +29,11 @@ tested, and measured** — see [Reported numbers](#reported-numbers).
 | 6 | Integration, recall@k vs. QPS curves | not started |
 | 7 | Stretch: filtered search (paper 05), RusKey RL compaction (paper 06) | not started |
 
-Phase 0 is complete. 152 unit tests, clippy clean at `-D warnings`.
+Phases 0 and 1 are complete. 181 unit tests, clippy clean at `-D warnings`.
+
+The three growth schemes are pinned against paper 01's own running examples —
+Figure 2 for vertical and horizontal-leveling, Figure 5 for horizontal-tiering —
+so they are checked against the source rather than against a reading of it.
 
 ## Architecture
 
@@ -79,8 +85,9 @@ first — and stop at the first entry found for the key, **including a tombstone
 | `src/storage/crc32.rs` | Table-driven CRC-32, matching zlib |
 | `src/storage/merge.rs` | K-way merge resolving key collisions by recency |
 | `src/storage/manifest.rs` | Which runs are live; replaced by atomic rename, the commit point |
-| `src/storage/growth/` | Axis 1: `vertical`, `horizontal` |
-| `src/storage/compaction/` | Axis 2: `leveling`, `tiering` |
+| `src/storage/shape.rs` | Read-only view of the tree, shared by both axes |
+| `src/storage/growth/` | Axis 1 — *when* to compact: `vertical`, `horizontal`, `horizontal_tiering`, `vertiorizon` |
+| `src/storage/compaction/` | Axis 2 — *how* to merge: `leveling`, `tiering` |
 | `src/storage/lsm.rs` | The tree: flush pipeline, multi-run read path, compaction, recovery |
 
 ## Running it
@@ -122,6 +129,19 @@ An earlier third simplification, tracking live files by directory listing rather
 than a manifest, turned out not to be safe and was removed rather than kept: it
 allowed stale reads after a crash mid-compaction. `src/storage/manifest.rs`
 explains the failure in full.
+
+**Not reproduced from paper 01**, and labelled as such rather than approximated:
+
+- **§5.2 self-tuning.** Vertiorizon can pick its own horizontal level count and
+  merge policy by minimising a cost model over the workload mix. Lemmas 5.1/5.2
+  defer their full proofs to the authors' technical report. Here the horizontal
+  part is configured explicitly instead.
+- **§5.3 skew adaptation** and the **dynamic Bloom filter layout**.
+
+**One ambiguity, flagged rather than guessed:** §5.1 says `n` is incremented "by
+a factor of `1/T`", which admits both `n ← n(1 + 1/T)` and `n ← n/T`. The second
+would shrink the horizontal part as data grows, contradicting the stated purpose,
+so the first is implemented. This is noted in `growth/vertiorizon.rs`.
 
 ## Source papers
 

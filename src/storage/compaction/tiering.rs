@@ -18,7 +18,8 @@
 //! should report read cost both in runs probed and in blocks actually read,
 //! because the filter makes those two diverge sharply.
 
-use super::{all_files, CompactionJob, Granularity, MergePolicy};
+use super::{all_source_levels, CompactionJob, MergePolicy};
+use crate::storage::growth::CompactionRequest;
 use crate::storage::shape::{is_deepest_level, TreeShape};
 
 /// Several runs per level, merged all at once and appended below.
@@ -58,19 +59,12 @@ impl MergePolicy for Tiering {
     /// each other, so a key-range slice of one still overlaps the rest and the
     /// level's run count — the thing read cost actually tracks — would not fall.
     /// The caller would pay to rewrite data without buying a single probe back.
-    fn plan(
-        &self,
-        tree: &TreeShape,
-        source_level: usize,
-        _granularity: Granularity,
-    ) -> Option<CompactionJob> {
-        let source = tree.level(source_level)?;
-        if source.is_empty() {
+    fn plan(&self, tree: &TreeShape, request: CompactionRequest) -> Option<CompactionJob> {
+        let sources = all_source_levels(tree, request);
+        if sources.is_empty() {
             return None;
         }
-
-        let sources = all_files(tree, source_level);
-        let target_level = source_level + 1;
+        let target_level = request.target_level;
 
         // Runs already at the target survive this compaction *and* overlap the
         // output. A tombstone dropped here would leave the older value in one of
@@ -80,7 +74,6 @@ impl MergePolicy for Tiering {
             .is_none_or(|shape| shape.is_empty());
 
         Some(CompactionJob {
-            source_level,
             sources,
             target_level,
             // Appended, not merged: this is where the write saving lives.
@@ -97,7 +90,12 @@ impl MergePolicy for Tiering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::growth::Granularity;
     use crate::storage::shape::LevelShape;
+
+    fn full(level: usize) -> CompactionRequest {
+        CompactionRequest::single(level, Granularity::Full)
+    }
 
     #[test]
     fn all_source_runs_merge_into_one_appended_run() {
@@ -108,8 +106,9 @@ mod tests {
             ],
         };
 
-        let job = Tiering::new(4).plan(&tree, 0, Granularity::Full).expect("job");
-        assert_eq!(job.sources.len(), 4);
+        let job = Tiering::new(4).plan(&tree, full(0)).expect("job");
+        assert_eq!(job.sources.len(), 1, "one source level");
+        assert_eq!(job.sources[0].runs.len(), 4);
         assert!(
             job.targets.is_empty(),
             "tiering never rewrites the level it writes into"
@@ -128,11 +127,11 @@ mod tests {
             ],
         };
 
-        let full = Tiering::new(4).plan(&tree, 0, Granularity::Full).expect("job");
-        let partial = Tiering::new(4)
-            .plan(&tree, 0, Granularity::Partial)
+        let whole = Tiering::new(4).plan(&tree, full(0)).expect("job");
+        let sliced = Tiering::new(4)
+            .plan(&tree, CompactionRequest::single(0, Granularity::Partial))
             .expect("job");
-        assert_eq!(full, partial);
+        assert_eq!(whole, sliced);
     }
 
     #[test]
@@ -142,7 +141,7 @@ mod tests {
         };
         assert!(
             Tiering::new(4)
-                .plan(&empty_target, 0, Granularity::Full)
+                .plan(&empty_target, full(0))
                 .expect("job")
                 .drop_tombstones,
             "nothing exists below, so nothing can be resurrected"
@@ -164,7 +163,7 @@ mod tests {
             ],
         };
 
-        let job = Tiering::new(4).plan(&tree, 0, Granularity::Full).expect("job");
+        let job = Tiering::new(4).plan(&tree, full(0)).expect("job");
         assert!(
             job.targets.is_empty(),
             "the surviving target run is exactly the danger"

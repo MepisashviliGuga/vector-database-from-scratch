@@ -21,7 +21,7 @@
 
 use std::fmt::Debug;
 
-use super::growth::Granularity;
+use super::growth::CompactionRequest;
 use super::shape::TreeShape;
 
 pub mod leveling;
@@ -39,16 +39,30 @@ pub struct RunFiles {
     pub files: Vec<usize>,
 }
 
+/// Files selected from one level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelFiles {
+    pub level: usize,
+    /// Runs within that level, **newest first**.
+    pub runs: Vec<RunFiles>,
+}
+
+impl LevelFiles {
+    pub fn file_count(&self) -> usize {
+        self.runs.iter().map(|run| run.files.len()).sum()
+    }
+}
+
 /// A unit of compaction work.
 ///
 /// Inputs are named down to the file, so a partial compaction can take a slice
 /// of a run rather than all of it. A full compaction simply names every file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionJob {
-    pub source_level: usize,
-    /// Runs and files to merge, **newest run first**. The merge depends on that
-    /// ordering to resolve key collisions by recency.
-    pub sources: Vec<RunFiles>,
+    /// Levels to merge, **shallowest first** — shallower levels hold newer
+    /// data, and the merge resolves key collisions by that order. Usually one
+    /// level; Vertiorizon drains several at once.
+    pub sources: Vec<LevelFiles>,
     pub target_level: usize,
     /// Files at the target level to rewrite. Always empty for tiering, which
     /// appends rather than merging.
@@ -64,33 +78,37 @@ pub struct CompactionJob {
 impl CompactionJob {
     /// Input runs, which is what the merge iterator is built over.
     pub fn input_run_count(&self) -> usize {
-        self.sources.len() + self.targets.len()
+        self.sources
+            .iter()
+            .map(|level| level.runs.len())
+            .sum::<usize>()
+            + self.targets.len()
     }
 
     /// Input files, which bounds how much this compaction rewrites.
     pub fn input_file_count(&self) -> usize {
         self.sources
             .iter()
-            .chain(self.targets.iter())
-            .map(|selection| selection.files.len())
-            .sum()
+            .map(LevelFiles::file_count)
+            .sum::<usize>()
+            + self
+                .targets
+                .iter()
+                .map(|selection| selection.files.len())
+                .sum::<usize>()
     }
 }
 
-/// Turns "compact level `i`" into a concrete merge.
+/// Turns a scheduled compaction into a concrete merge.
 pub trait MergePolicy: Debug + Send + Sync {
     fn name(&self) -> &'static str;
 
-    /// Plan the compaction of `source_level` into `source_level + 1`.
+    /// Plan the compaction the growth scheme has requested.
     ///
-    /// `granularity` comes from the growth scheme, which owns that decision —
-    /// see [`Granularity`]. Returns `None` when the level holds nothing to move.
-    fn plan(
-        &self,
-        tree: &TreeShape,
-        source_level: usize,
-        granularity: Granularity,
-    ) -> Option<CompactionJob>;
+    /// Granularity and the level span both come from the request, since the
+    /// growth scheme owns those decisions. Returns `None` when the named levels
+    /// hold nothing to move.
+    fn plan(&self, tree: &TreeShape, request: CompactionRequest) -> Option<CompactionJob>;
 
     /// Runs a level may hold: 1 for leveling, `T` for tiering. The executor uses
     /// this to decide whether disjoint runs at a level should be folded into one.
@@ -112,12 +130,31 @@ pub(crate) fn all_files(tree: &TreeShape, level: usize) -> Vec<RunFiles> {
     })
 }
 
+/// Every file across a request's source levels, shallowest level first.
+pub(crate) fn all_source_levels(
+    tree: &TreeShape,
+    request: CompactionRequest,
+) -> Vec<LevelFiles> {
+    request
+        .source_levels()
+        .filter_map(|level| {
+            let runs = all_files(tree, level);
+            (!runs.is_empty()).then_some(LevelFiles { level, runs })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::shape::LevelShape;
 
+    use crate::storage::growth::Granularity;
     use crate::storage::shape::{FileShape, RunShape};
+
+    fn full(level: usize) -> CompactionRequest {
+        CompactionRequest::single(level, Granularity::Full)
+    }
 
     fn run(index: usize, bytes: u64, min: &str, max: &str) -> RunShape {
         RunShape {
@@ -146,10 +183,8 @@ mod tests {
 
         for policy in policies {
             assert!(!policy.name().is_empty());
-            let job = policy
-                .plan(&tree, 0, Granularity::Full)
-                .expect("level 0 holds data");
-            assert_eq!(job.source_level, 0);
+            let job = policy.plan(&tree, full(0)).expect("level 0 holds data");
+            assert_eq!(job.sources[0].level, 0);
             assert_eq!(job.target_level, 1);
             assert!(!job.sources.is_empty());
         }
@@ -160,10 +195,10 @@ mod tests {
         let tree = TreeShape {
             levels: vec![LevelShape::default(), LevelShape::from_sizes(&[900])],
         };
-        assert_eq!(Leveling.plan(&tree, 0, Granularity::Full), None);
-        assert_eq!(Tiering::new(4).plan(&tree, 0, Granularity::Full), None);
+        assert_eq!(Leveling.plan(&tree, full(0)), None);
+        assert_eq!(Tiering::new(4).plan(&tree, full(0)), None);
         assert_eq!(
-            Leveling.plan(&tree, 99, Granularity::Full),
+            Leveling.plan(&tree, full(99)),
             None,
             "a level that does not exist"
         );
@@ -183,10 +218,8 @@ mod tests {
             ],
         };
 
-        let leveling = Leveling.plan(&tree, 0, Granularity::Full).expect("job");
-        let tiering = Tiering::new(4)
-            .plan(&tree, 0, Granularity::Full)
-            .expect("job");
+        let leveling = Leveling.plan(&tree, full(0)).expect("job");
+        let tiering = Tiering::new(4).plan(&tree, full(0)).expect("job");
 
         assert_eq!(leveling.targets.len(), 1);
         assert!(tiering.targets.is_empty());

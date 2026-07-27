@@ -50,7 +50,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::compaction::{CompactionJob, Leveling, MergePolicy, RunFiles, Tiering};
-use super::growth::{GrowthScheme, HorizontalLeveling, HorizontalTiering, Vertical};
+use super::growth::{
+    GrowthScheme, HorizontalLeveling, HorizontalPolicy, HorizontalTiering, Vertical, Vertiorizon,
+};
 use super::manifest::{table_filename, Manifest, RunEntry};
 use super::merge::{memtable_source, MergeIterator, Source};
 use super::shape::{FileShape, LevelShape, RunShape, TreeShape};
@@ -127,6 +129,18 @@ pub enum GrowthKind {
         buffer_bytes: u64,
         expected_data_bytes: u64,
     },
+    /// Paper 01's central contribution (§5): a horizontal part above two
+    /// vertical levels.
+    Vertiorizon {
+        /// Levels in the horizontal part.
+        horizontal_levels: usize,
+        size_ratio: u64,
+        buffer_bytes: u64,
+        /// Horizontal part capacity as a multiple of the buffer; grows as the
+        /// data set does.
+        initial_n: u64,
+        policy: HorizontalPolicy,
+    },
 }
 
 impl GrowthKind {
@@ -145,6 +159,19 @@ impl GrowthKind {
                 levels,
                 buffer_bytes,
                 expected_data_bytes,
+            )),
+            Self::Vertiorizon {
+                horizontal_levels,
+                size_ratio,
+                buffer_bytes,
+                initial_n,
+                policy,
+            } => Box::new(Vertiorizon::new(
+                horizontal_levels,
+                size_ratio,
+                buffer_bytes,
+                initial_n,
+                policy,
             )),
         }
     }
@@ -504,10 +531,7 @@ impl LsmTree {
             let Some(request) = self.growth.next_compaction(&shape) else {
                 return Ok(());
             };
-            let Some(job) = self
-                .merge
-                .plan(&shape, request.level, request.granularity)
-            else {
+            let Some(job) = self.merge.plan(&shape, request) else {
                 continue;
             };
             self.execute(job)?;
@@ -521,12 +545,26 @@ impl LsmTree {
         // Take ownership of the inputs up front. Nothing else may reference them
         // while the merge streams through. Files are removed before empty runs
         // are pruned, so the run indices the job named stay valid throughout.
-        let source_files = take_files(&mut self.levels[job.source_level], &job.sources);
+        //
+        // Source levels are visited shallowest first, which is the merge order:
+        // shallower levels hold newer data.
+        let mut source_files: Vec<Vec<SSTable>> = Vec::new();
+        for level_files in &job.sources {
+            let Some(level) = self.levels.get_mut(level_files.level) else {
+                continue;
+            };
+            source_files.extend(take_files(level, &level_files.runs));
+        }
         let target_files = match self.levels.get_mut(job.target_level) {
             Some(level) => take_files(level, &job.targets),
             None => Vec::new(),
         };
-        prune_empty_runs(&mut self.levels[job.source_level]);
+
+        for level_files in &job.sources {
+            if let Some(level) = self.levels.get_mut(level_files.level) {
+                prune_empty_runs(level);
+            }
+        }
         if let Some(level) = self.levels.get_mut(job.target_level) {
             prune_empty_runs(level);
         }
@@ -928,6 +966,21 @@ mod tests {
         }
     }
 
+    /// Two horizontal levels over the two-level vertical part.
+    fn vertiorizon_config() -> LsmConfig {
+        LsmConfig {
+            growth: GrowthKind::Vertiorizon {
+                horizontal_levels: 2,
+                size_ratio: 4,
+                buffer_bytes: 1024,
+                initial_n: 4,
+                policy: HorizontalPolicy::Leveling,
+            },
+            merge: MergeKind::Leveling,
+            ..test_config()
+        }
+    }
+
     /// Compaction effectively disabled, for tests about flush and recovery
     /// alone: a buffer size no level can ever reach.
     fn no_compaction_config() -> LsmConfig {
@@ -1090,6 +1143,21 @@ mod tests {
                         levels: 4,
                         buffer_bytes: 1024,
                         expected_data_bytes: 256 * 1024,
+                    },
+                    merge: MergeKind::Tiering { runs_per_level: 4 },
+                    ..test_config()
+                },
+            ),
+            ("vertiorizon", vertiorizon_config()),
+            (
+                "vertiorizon-tiering",
+                LsmConfig {
+                    growth: GrowthKind::Vertiorizon {
+                        horizontal_levels: 2,
+                        size_ratio: 4,
+                        buffer_bytes: 1024,
+                        initial_n: 4,
+                        policy: HorizontalPolicy::Tiering,
                     },
                     merge: MergeKind::Tiering { runs_per_level: 4 },
                     ..test_config()
@@ -1593,6 +1661,72 @@ mod tests {
 
         let live: Vec<_> = tree.iter().map(|entry| entry.expect("iter")).collect();
         assert_eq!(live, expected);
+    }
+
+    /// Vertiorizon must actually build the shape it describes: a horizontal part
+    /// on top, then exactly two vertical levels holding the bulk of the data.
+    #[test]
+    fn vertiorizon_builds_a_two_part_tree() {
+        let dir = TempDir::new("vertiorizon-shape");
+        let mut tree = LsmTree::open(&dir.path, vertiorizon_config()).expect("open");
+
+        for i in 0..6000 {
+            let key = format!("key{:05}", (i * 7919) % 6000);
+            tree.put(key.into_bytes(), vec![b'v'; 60]).expect("put");
+        }
+        tree.flush().expect("flush");
+
+        let stats = tree.stats();
+        assert!(stats.compaction_count > 0, "compaction never ran");
+        assert!(
+            stats.level_bytes.len() > 2,
+            "expected the vertical part to be populated, got {:?}",
+            stats.level_bytes
+        );
+
+        // Horizontal part is levels 0..1, vertical part is 2..3. The vertical
+        // part should hold the large majority — that is the whole design.
+        let horizontal: u64 = stats.level_bytes.iter().take(2).sum();
+        let vertical: u64 = stats.level_bytes.iter().skip(2).sum();
+        assert!(
+            vertical > horizontal,
+            "the vertical part should hold the bulk of the data: {vertical} vs {horizontal}"
+        );
+        assert!(
+            stats.level_bytes.len() <= 4,
+            "Vertiorizon is 2 horizontal + 2 vertical levels, got {:?}",
+            stats.level_bytes
+        );
+    }
+
+    /// The horizontal part is where nearly all compactions happen, so it must
+    /// stay a small slice of the tree — otherwise its full compactions would be
+    /// expensive and the design would gain nothing.
+    ///
+    /// The bound is a *fraction*, not an absolute size: `n` grows as the data
+    /// does, so the horizontal capacity is not fixed. With `T = 4` the intended
+    /// split is roughly `1 : T′ : T²` = `1 : 2.83 : 16`, putting the horizontal
+    /// part near 5% of the total.
+    #[test]
+    fn vertiorizon_keeps_its_horizontal_part_small() {
+        let dir = TempDir::new("vertiorizon-drain");
+        let mut tree = LsmTree::open(&dir.path, vertiorizon_config()).expect("open");
+
+        for i in 0..3000 {
+            let key = format!("key{:05}", (i * 7919) % 3000);
+            tree.put(key.into_bytes(), vec![b'v'; 60]).expect("put");
+        }
+        tree.flush().expect("flush");
+
+        let stats = tree.stats();
+        let horizontal: u64 = stats.level_bytes.iter().take(2).sum();
+        let total: u64 = stats.level_bytes.iter().sum();
+        assert!(total > 0, "nothing was written");
+        assert!(
+            horizontal * 4 < total,
+            "the horizontal part holds {horizontal} of {total} bytes, far more than \
+             the intended 1 : T′ : T² split allows"
+        );
     }
 
     #[test]

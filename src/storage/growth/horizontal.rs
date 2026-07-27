@@ -116,14 +116,11 @@ impl GrowthScheme for HorizontalLeveling {
                 }
                 self.counters[level + 1] += 1;
                 self.counters[level] = 0;
-                return Some(CompactionRequest {
-                    level,
-                    // The scheme is *defined* on full compaction: the counters
-                    // measure whole-level merges, so slicing one would break the
-                    // correspondence between a counter tick and a level's worth
-                    // of data. This is also the source of its space cost.
-                    granularity: Granularity::Full,
-                });
+                // The scheme is *defined* on full compaction: the counters
+                // measure whole-level merges, so slicing one would break the
+                // correspondence between a counter tick and a level's worth of
+                // data. This is also the source of its space cost.
+                return Some(CompactionRequest::single(level, Granularity::Full));
             }
         }
         None
@@ -161,7 +158,7 @@ mod tests {
                     Granularity::Full,
                     "the horizontal scheme is defined on full compaction"
                 );
-                if request.level == 0 {
+                if request.first_level == 0 {
                     fired.push(flush);
                 }
             }
@@ -196,7 +193,7 @@ mod tests {
 
         scheme.note_flush();
         assert_eq!(scheme.counters(), &[1, 0], "after the first flush");
-        assert_eq!(scheme.next_compaction(&tree).map(|r| r.level), Some(0));
+        assert_eq!(scheme.next_compaction(&tree).map(|r| r.first_level), Some(0));
         assert_eq!(scheme.counters(), &[0, 1], "C_1 resets, C_2 increments");
 
         scheme.note_flush();
@@ -204,7 +201,7 @@ mod tests {
 
         scheme.note_flush();
         assert_eq!(scheme.counters(), &[2, 1]);
-        assert_eq!(scheme.next_compaction(&tree).map(|r| r.level), Some(0));
+        assert_eq!(scheme.next_compaction(&tree).map(|r| r.first_level), Some(0));
         assert_eq!(scheme.counters(), &[0, 2]);
     }
 
@@ -250,7 +247,7 @@ mod tests {
         for _ in 0..40 {
             scheme.note_flush();
             while let Some(request) = scheme.next_compaction(&tree) {
-                if request.level == 1 {
+                if request.first_level == 1 {
                     deep_fired += 1;
                 }
             }
@@ -268,9 +265,9 @@ mod tests {
             scheme.note_flush();
             while let Some(request) = scheme.next_compaction(&tree) {
                 assert!(
-                    request.level < 2,
+                    request.first_level < 2,
                     "level {} is the deepest and cannot compact",
-                    request.level
+                    request.first_level
                 );
             }
         }
@@ -305,11 +302,11 @@ mod tests {
             let mut seen = Vec::new();
             while let Some(request) = scheme.next_compaction(&tree) {
                 assert!(
-                    !seen.contains(&request.level),
+                    !seen.contains(&request.first_level),
                     "level {} fired twice in one flush: {seen:?}",
-                    request.level
+                    request.first_level
                 );
-                seen.push(request.level);
+                seen.push(request.first_level);
             }
             assert!(
                 seen.windows(2).all(|pair| pair[0] < pair[1]),

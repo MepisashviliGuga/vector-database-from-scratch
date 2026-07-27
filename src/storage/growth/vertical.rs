@@ -114,14 +114,14 @@ impl GrowthScheme for Vertical {
             bytes > 0 && bytes >= self.level_capacity_bytes(level)
         })?;
 
-        Some(CompactionRequest {
+        Some(CompactionRequest::single(
             level,
-            granularity: if level == 0 {
+            if level == 0 {
                 Granularity::Full
             } else {
                 Granularity::Partial
             },
-        })
+        ))
     }
 
     /// Unbounded: the scheme adds levels as needed.
@@ -139,7 +139,7 @@ mod tests {
 
     /// The level a request names, discarding granularity.
     fn level_of(request: Option<CompactionRequest>) -> Option<usize> {
-        request.map(|request| request.level)
+        request.map(|request| request.first_level)
     }
 
     /// Build a tree whose levels hold the given byte counts.
@@ -187,7 +187,9 @@ mod tests {
         let mut scheme = Vertical::new(1, 2);
 
         let at_level_zero = scheme.next_compaction(&tree(&[9])).expect("a request");
-        assert_eq!(at_level_zero.level, 0);
+        assert_eq!(at_level_zero.first_level, 0);
+        assert_eq!(at_level_zero.target_level, 1);
+        assert!(!at_level_zero.spans_multiple_levels());
         assert_eq!(
             at_level_zero.granularity,
             Granularity::Full,
@@ -195,7 +197,7 @@ mod tests {
         );
 
         let deeper = scheme.next_compaction(&tree(&[0, 99])).expect("a request");
-        assert_eq!(deeper.level, 1);
+        assert_eq!(deeper.first_level, 1);
         assert_eq!(deeper.granularity, Granularity::Partial);
     }
 

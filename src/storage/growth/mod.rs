@@ -47,10 +47,12 @@ use super::shape::TreeShape;
 pub mod horizontal;
 pub mod horizontal_tiering;
 pub mod vertical;
+pub mod vertiorizon;
 
 pub use horizontal::HorizontalLeveling;
 pub use horizontal_tiering::HorizontalTiering;
 pub use vertical::Vertical;
+pub use vertiorizon::{HorizontalPolicy, Vertiorizon};
 
 /// How much of a level one compaction moves.
 ///
@@ -72,11 +74,42 @@ pub enum Granularity {
 }
 
 /// One compaction the growth scheme has scheduled.
+///
+/// Sources are a *span* of levels rather than a single one, because Vertiorizon
+/// drains its entire horizontal part into the vertical part in one merge. Every
+/// other scheme uses [`CompactionRequest::single`], where the span is one level
+/// and the target is the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactionRequest {
-    /// Compacts into `level + 1`.
-    pub level: usize,
+    /// Shallowest source level, which holds the newest data.
+    pub first_level: usize,
+    /// Deepest source level, inclusive.
+    pub last_level: usize,
+    pub target_level: usize,
     pub granularity: Granularity,
+}
+
+impl CompactionRequest {
+    /// The ordinary case: merge one level into the next.
+    pub fn single(level: usize, granularity: Granularity) -> Self {
+        Self {
+            first_level: level,
+            last_level: level,
+            target_level: level + 1,
+            granularity,
+        }
+    }
+
+    /// Source levels, shallowest first — the order the merge needs, since
+    /// shallower levels hold newer data.
+    pub fn source_levels(&self) -> impl Iterator<Item = usize> {
+        self.first_level..=self.last_level
+    }
+
+    /// Whether this merges more than one level at once.
+    pub fn spans_multiple_levels(&self) -> bool {
+        self.last_level > self.first_level
+    }
 }
 
 /// Decides when a level compacts into the next, and at what granularity.
