@@ -6,7 +6,9 @@
 //! runs), stopping at the first entry found for a key — including a tombstone.
 
 pub mod bloom;
+pub mod compaction;
 pub mod crc32;
+pub mod growth;
 pub mod lsm;
 pub mod memtable;
 pub mod merge;
@@ -14,6 +16,8 @@ pub mod sstable;
 pub mod wal;
 
 pub use bloom::BloomFilter;
+pub use compaction::{CompactionJob, CompactionPolicy, Leveling, Tiering, TreeShape};
+pub use growth::{GrowthScheme, Horizontal, Vertical};
 pub use lsm::{LsmConfig, LsmStats, LsmTree};
 pub use memtable::{MemTable, Value};
 pub use merge::MergeIterator;
