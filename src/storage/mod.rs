@@ -5,11 +5,15 @@
 //! Read path: newest source first (memtable, then progressively older on-disk
 //! runs), stopping at the first entry found for a key — including a tombstone.
 
+pub mod bloom;
 pub mod crc32;
 pub mod memtable;
+pub mod sstable;
 pub mod wal;
 
+pub use bloom::BloomFilter;
 pub use memtable::{MemTable, Value};
+pub use sstable::{SSTable, SSTableMeta, SSTableWriter};
 pub use wal::{Replay, SyncPolicy, Wal};
 
 /// Keys are opaque byte strings, ordered lexicographically. The engine never

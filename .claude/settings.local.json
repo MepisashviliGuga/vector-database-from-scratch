@@ -12,7 +12,8 @@
       "PowerShell($p = \"C:\\\\Users\\\\Guga\\\\OneDrive - Kutaisi International University\\\\Desktop\\\\Vector Database Built From Scratch\\\\Papers\"; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $papers = @\\(@{id=\"2411.12229\"; name=\"04-symphonyqg-quantization-graph.pdf\"}, @{id=\"2502.07343\"; name=\"05-deg-hybrid-vector-search.pdf\"}, @{id=\"2308.07013\"; name=\"06-ruskey-rl-lsm.pdf\"}\\); foreach \\($paper in $papers\\) { $out = Join-Path $p $paper.name; try { Invoke-WebRequest -Uri \"https://arxiv.org/pdf/$\\($paper.id\\)\" -OutFile $out -UseBasicParsing -UserAgent \"Mozilla/5.0\"; \"OK  $\\($paper.name\\)  $\\([math]::Round\\(\\(Get-Item $out\\).Length/1MB,2\\)\\) MB\" } catch { \"FAIL $\\($paper.name\\): $\\($_.Exception.Message\\)\" } })",
       "Bash(python *)",
       "PowerShell(cargo *)",
-      "PowerShell(Remove-Item *)"
+      "PowerShell(Remove-Item *)",
+      "PowerShell(Set-Location *)"
     ]
   }
 }
