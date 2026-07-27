@@ -1,237 +1,309 @@
-//! Horizontal growth: fixed number of levels, capacities grow with the data.
+//! Horizontal growth under leveling: fixed level count, compaction counters.
 //!
-//! The inverse of [`super::Vertical`]. The tree is created with `L` levels and
-//! keeps exactly `L` levels forever; when the data set grows, every level's
-//! capacity grows with it:
+//! **Faithful reproduction of Algorithm 1, paper 01 §3.** Used by BigTable,
+//! HBase and AsterixDB.
 //!
-//! ```text
-//!   T = 10, L = 4
-//!
-//!   N = 1 GiB                     N = 10 GiB
-//!   L0 │▏          ~1 MiB         L0 │▎          ~10 MiB
-//!   L1 │▍         ~10 MiB         L1 │█         ~100 MiB
-//!   L2 │██       ~100 MiB         L2 │████        ~1 GiB
-//!   L3 │████████  ~900 MiB        L3 │████████    ~9 GiB
-//!            same shape, scaled up
-//! ```
-//!
-//! # The capacity formula
-//!
-//! Capacities form a geometric series with ratio `T` that must sum to the data
-//! size `N`. With `c` the capacity of level 0:
+//! The tree is created with `ℓ` levels and keeps exactly `ℓ` forever; as data
+//! grows, every level's capacity grows with it. But capacity is the *effect*,
+//! not the mechanism. The scheme is defined by a compaction counter per level:
 //!
 //! ```text
-//!   c + cT + cT² + ... + cT^(L-1) = N
-//!   c (T^L - 1) / (T - 1)         = N
-//!   c                             = N (T - 1) / (T^L - 1)
+//!   C_i ← 0 for all i
+//!   on each buffer flush:
+//!     C_1 ← C_1 + 1
+//!     for i in 1..ℓ-1:
+//!       if C_i > C_(i+1):
+//!         full compaction from level i to level i+1
+//!         C_(i+1) ← C_(i+1) + 1
+//!         C_i ← 0
 //! ```
 //!
-//! so level `i` gets `capacity_i = N (T - 1) T^i / (T^L - 1)`. The bottom level
-//! takes `(T-1)/T` of the total — 90% at `T = 10` — and everything above it
-//! shares the remaining tenth.
+//! `C_i` counts compactions into level `i` since level `i` last compacted
+//! onward, and `C_1` counts buffer flushes. The condition `C_i > C_(i+1)` fires
+//! when level `i` has taken in more merges than it has passed on.
 //!
-//! # What it costs
+//! # Why this beats a capacity check
 //!
-//! Lookup cost is bounded: there are always `L` levels to probe, no matter how
-//! large the data set becomes. That is the scheme's appeal, and why it sits at a
-//! different point on the read-write trade-off curve than vertical.
+//! The counters produce a *decreasing compaction frequency*. With `ℓ = 2` the
+//! compactions land at flushes 1, 3, 6, 10, … — gaps of 1, 2, 3, 4. Level 1
+//! merges down constantly while level 2 is nearly empty, and progressively less
+//! often as level 2 grows.
 //!
-//! Its weakness is space. Paper 01 reports that Vertiorizon cuts space cost by
-//! roughly **6x** versus the horizontal scheme, measured inside RocksDB. This
-//! module does not attempt to re-derive why — that analysis is read carefully in
-//! Phase 1, before Vertiorizon is implemented, and the mechanism is written up
-//! then. What matters here is that horizontal is implemented faithfully enough
-//! for that comparison to be measured on the same engine rather than asserted.
+//! That is the whole point. Under leveling a compaction rewrites the target
+//! level, so it costs what that level currently holds; doing the merges while
+//! they are cheap and deferring them once they are expensive is what minimises
+//! total write cost. Bentley and Saxe (1980) proved this schedule optimal for a
+//! fixed level count, and since leveling's read cost is proportional to level
+//! count, the horizontal scheme sits on the optimal read-write frontier.
+//!
+//! A capacity formula reproduces roughly the right level *sizes* with the wrong
+//! *timing*, and the timing is the result.
+//!
+//! # Its weakness
+//!
+//! The scheme is defined on **full compaction**: one merge moves an entire level
+//! at once. The inputs cannot be freed until it completes, so a large level
+//! transiently needs room for both inputs and outputs, and levels above it
+//! cannot drain meanwhile. That operational cost — not any steady-state
+//! occupancy — is why industry chose the vertical scheme, and what Vertiorizon
+//! addresses by giving the bottom two levels to a vertical part that can compact
+//! partially.
 
-use super::{saturating_geometric, GrowthScheme};
+use super::{GrowthScheme, TreeShape};
 
-/// Fixed level count; capacities scale with the data set.
-#[derive(Debug, Clone, Copy)]
-pub struct Horizontal {
-    level_count: usize,
-    size_ratio: u64,
-    /// Floor on any level's capacity.
+/// Fixed level count, compaction driven by per-level counters.
+#[derive(Debug, Clone)]
+pub struct HorizontalLeveling {
+    /// `C_i`, 0-indexed: `counters[0]` is the paper's `C_1`.
+    counters: Vec<u64>,
+    /// Where the current flush's downward scan has reached.
     ///
-    /// Without it, a small database computes fractional-byte capacities that
-    /// round to zero, and every level would read as permanently over budget —
-    /// compaction would thrash on an almost empty tree.
-    min_level_bytes: u64,
+    /// Algorithm 1's inner loop is a single ascending pass per flush, not a
+    /// repeat-until-settled loop. Resuming from a cursor reproduces that;
+    /// rescanning from level 0 each call would fire extra compactions the paper
+    /// does not.
+    scan_cursor: usize,
 }
 
-impl Horizontal {
+impl HorizontalLeveling {
     /// # Panics
     ///
-    /// If `level_count` is 0 or `size_ratio < 2`.
-    pub fn new(level_count: usize, size_ratio: u64, min_level_bytes: u64) -> Self {
-        assert!(level_count > 0, "a tree needs at least one level");
-        assert!(
-            size_ratio >= 2,
-            "size ratio must be at least 2, got {size_ratio}"
-        );
-        assert!(min_level_bytes > 0, "minimum level capacity must be positive");
+    /// If `levels < 2`. With one level there is nowhere to compact to.
+    pub fn new(levels: usize) -> Self {
+        assert!(levels >= 2, "a horizontal tree needs at least 2 levels");
         Self {
-            level_count,
-            size_ratio,
-            min_level_bytes,
+            counters: vec![0; levels],
+            // No flush has happened yet, so no scan is in progress.
+            scan_cursor: levels,
         }
     }
 
-    pub fn min_level_bytes(&self) -> u64 {
-        self.min_level_bytes
+    pub fn levels(&self) -> usize {
+        self.counters.len()
+    }
+
+    /// Current counter values, for tests and for tracing a schedule.
+    pub fn counters(&self) -> &[u64] {
+        &self.counters
     }
 }
 
-impl GrowthScheme for Horizontal {
+impl GrowthScheme for HorizontalLeveling {
     fn name(&self) -> &'static str {
-        "horizontal"
+        "horizontal-leveling"
     }
 
-    /// `N (T-1) T^i / (T^L - 1)`, floored at `min_level_bytes`.
-    ///
-    /// Computed in `u128` so the `N * T^i` numerator does not overflow before
-    /// the division brings it back into range.
-    fn level_capacity_bytes(&self, level: usize, total_bytes: u64) -> u64 {
-        // A level below the bottom of this tree holds nothing. Compaction uses
-        // this to know it must never create one.
-        if level >= self.level_count {
-            return 0;
+    fn note_flush(&mut self) {
+        self.counters[0] += 1;
+        // Begin this flush's single ascending pass.
+        self.scan_cursor = 0;
+    }
+
+    fn next_compaction(&mut self, tree: &TreeShape) -> Option<usize> {
+        // The deepest level never compacts onward; there is nothing below it.
+        let last_source = self.counters.len().saturating_sub(1);
+
+        while self.scan_cursor < last_source {
+            let level = self.scan_cursor;
+            self.scan_cursor += 1;
+
+            if self.counters[level] > self.counters[level + 1] {
+                // An empty level satisfies the counter condition but has nothing
+                // to move. Leaving the counters untouched keeps the schedule
+                // aligned with the data rather than running ahead of it.
+                if tree.level_bytes(level) == 0 {
+                    continue;
+                }
+                self.counters[level + 1] += 1;
+                self.counters[level] = 0;
+                return Some(level);
+            }
         }
-
-        let ratio = self.size_ratio as u128;
-        let denominator = saturating_geometric(1, self.size_ratio, self.level_count) as u128 - 1;
-        let numerator = (total_bytes as u128)
-            .saturating_mul(ratio - 1)
-            .saturating_mul(saturating_geometric(1, self.size_ratio, level) as u128);
-
-        let capacity = (numerator / denominator.max(1)).min(u64::MAX as u128) as u64;
-        capacity.max(self.min_level_bytes)
+        None
     }
 
-    /// Constant, by definition. This is the whole point of the scheme.
-    fn target_level_count(&self, _total_bytes: u64) -> usize {
-        self.level_count
-    }
-
-    fn size_ratio(&self) -> u64 {
-        self.size_ratio
+    fn max_levels(&self) -> Option<usize> {
+        Some(self.counters.len())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::shape::LevelShape;
 
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * MIB;
-
-    /// The defining property, and the exact inverse of vertical's.
-    #[test]
-    fn level_count_never_changes() {
-        let scheme = Horizontal::new(4, 10, 1024);
-        for total in [0, MIB, GIB, 1000 * GIB, u64::MAX] {
-            assert_eq!(scheme.target_level_count(total), 4);
+    /// A tree with plenty of data everywhere, so only the counters decide.
+    fn full_tree(levels: usize) -> TreeShape {
+        TreeShape {
+            levels: (0..levels)
+                .map(|_| LevelShape::from_sizes(&[1024]))
+                .collect(),
         }
     }
 
-    #[test]
-    fn capacities_scale_with_the_data_size() {
-        let scheme = Horizontal::new(4, 10, 1024);
-
-        let at_one_gib = scheme.level_capacity_bytes(3, GIB);
-        let at_ten_gib = scheme.level_capacity_bytes(3, 10 * GIB);
-
-        let growth = at_ten_gib as f64 / at_one_gib as f64;
-        assert!(
-            (9.9..=10.1).contains(&growth),
-            "tenfold data should give a tenfold capacity, got {growth:.3}x"
-        );
-    }
-
-    #[test]
-    fn capacities_sum_to_the_data_size() {
-        let scheme = Horizontal::new(5, 10, 1);
-        let total = 100 * GIB;
-
-        let sum: u64 = (0..5).map(|i| scheme.level_capacity_bytes(i, total)).sum();
-        let error = (sum as f64 - total as f64).abs() / total as f64;
-        assert!(
-            error < 0.001,
-            "level capacities should sum to the data size; sum {sum}, total {total}"
-        );
-    }
-
-    /// The bottom level takes `(T-1)/T` of everything — 90% at ratio 10.
-    #[test]
-    fn the_bottom_level_holds_the_large_majority() {
-        let scheme = Horizontal::new(4, 10, 1);
-        let total = 100 * GIB;
-
-        let bottom = scheme.level_capacity_bytes(3, total) as f64 / total as f64;
-        assert!(
-            (0.89..=0.91).contains(&bottom),
-            "bottom level should hold ~90% of the data, got {:.1}%",
-            bottom * 100.0
-        );
-    }
-
-    #[test]
-    fn consecutive_capacities_keep_the_size_ratio() {
-        let scheme = Horizontal::new(5, 10, 1);
-        let total = 1000 * GIB;
-
-        for level in 0..4 {
-            let lower = scheme.level_capacity_bytes(level, total) as f64;
-            let higher = scheme.level_capacity_bytes(level + 1, total) as f64;
-            let ratio = higher / lower;
-            assert!(
-                (9.9..=10.1).contains(&ratio),
-                "level {level} to {} ratio was {ratio:.3}, expected ~10",
-                level + 1
-            );
+    /// Flush numbers at which a compaction from level 0 fires, over `flushes`
+    /// buffer flushes.
+    fn compaction_schedule(scheme: &mut HorizontalLeveling, flushes: usize) -> Vec<usize> {
+        let tree = full_tree(scheme.levels());
+        let mut fired = Vec::new();
+        for flush in 1..=flushes {
+            scheme.note_flush();
+            while let Some(level) = scheme.next_compaction(&tree) {
+                if level == 0 {
+                    fired.push(flush);
+                }
+            }
         }
+        fired
     }
 
-    /// A level past the bottom holds nothing, so compaction never invents one.
+    /// **Paper 01, Figure 2, horizontal scheme with ℓ = 2.**
+    ///
+    /// The paper's trace, quoted: after the first flush `C_1 = 1` and `C_2 = 0`,
+    /// so `C_1 > C_2` fires a compaction, after which `C_1` resets to 0 and `C_2`
+    /// becomes 1. At `n = 3`, `C_1 = 2` surpasses `C_2 = 1` and fires again. "A
+    /// similar process recurs at n = 6."
+    ///
+    /// Compactions therefore land at flushes 1, 3 and 6.
     #[test]
-    fn levels_beyond_the_bottom_have_no_capacity() {
-        let scheme = Horizontal::new(3, 10, 1024);
-        assert!(scheme.level_capacity_bytes(2, GIB) > 0);
-        assert_eq!(scheme.level_capacity_bytes(3, GIB), 0);
-        assert_eq!(scheme.level_capacity_bytes(99, GIB), 0);
+    fn reproduces_the_papers_horizontal_trace() {
+        let mut scheme = HorizontalLeveling::new(2);
+        let fired = compaction_schedule(&mut scheme, 6);
+        assert_eq!(
+            fired,
+            vec![1, 3, 6],
+            "paper 01 Figure 2 places compactions at flushes 1, 3 and 6"
+        );
     }
 
-    /// On an almost empty tree the formula yields fractional bytes. Without a
-    /// floor those round to zero and every level looks permanently over budget,
-    /// which would make compaction thrash.
+    /// The counter values the paper states explicitly along the way.
     #[test]
-    fn a_tiny_database_still_gets_usable_capacities() {
-        let scheme = Horizontal::new(4, 10, 4096);
+    fn counters_follow_the_papers_values() {
+        let mut scheme = HorizontalLeveling::new(2);
+        let tree = full_tree(2);
 
-        for total in [0, 1, 100, 4096] {
-            for level in 0..4 {
-                assert!(
-                    scheme.level_capacity_bytes(level, total) >= 4096,
-                    "level {level} at total {total} fell below the floor"
-                );
+        scheme.note_flush();
+        assert_eq!(scheme.counters(), &[1, 0], "after the first flush");
+        assert_eq!(scheme.next_compaction(&tree), Some(0));
+        assert_eq!(scheme.counters(), &[0, 1], "C_1 resets, C_2 increments");
+
+        scheme.note_flush();
+        assert_eq!(scheme.next_compaction(&tree), None, "1 > 1 is false");
+
+        scheme.note_flush();
+        assert_eq!(scheme.counters(), &[2, 1]);
+        assert_eq!(scheme.next_compaction(&tree), Some(0));
+        assert_eq!(scheme.counters(), &[0, 2]);
+    }
+
+    /// The property that makes the scheme optimal: gaps between compactions grow.
+    #[test]
+    fn compaction_frequency_decreases_as_the_tree_grows() {
+        let mut scheme = HorizontalLeveling::new(2);
+        let fired = compaction_schedule(&mut scheme, 60);
+
+        // 1, 3, 6, 10, 15, ... — the triangular numbers.
+        assert_eq!(&fired[..6], &[1, 3, 6, 10, 15, 21]);
+
+        let gaps: Vec<usize> = fired.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert!(
+            gaps.windows(2).all(|pair| pair[1] >= pair[0]),
+            "gaps between compactions must never shrink: {gaps:?}"
+        );
+        assert!(
+            gaps.last().unwrap() > gaps.first().unwrap(),
+            "the schedule must actually slow down over time"
+        );
+    }
+
+    /// Contrast with vertical, whose gaps are constant. This is the difference
+    /// the whole paper turns on.
+    #[test]
+    fn the_schedule_differs_from_a_fixed_frequency() {
+        let mut scheme = HorizontalLeveling::new(2);
+        let fired = compaction_schedule(&mut scheme, 30);
+        let gaps: Vec<usize> = fired.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert!(
+            gaps.iter().collect::<std::collections::HashSet<_>>().len() > 1,
+            "a fixed compaction frequency would give identical gaps: {gaps:?}"
+        );
+    }
+
+    #[test]
+    fn deeper_levels_compact_too() {
+        let mut scheme = HorizontalLeveling::new(3);
+        let tree = full_tree(3);
+        let mut deep_fired = 0;
+
+        for _ in 0..40 {
+            scheme.note_flush();
+            while let Some(level) = scheme.next_compaction(&tree) {
+                if level == 1 {
+                    deep_fired += 1;
+                }
+            }
+        }
+        assert!(deep_fired > 0, "level 1 should have compacted into level 2");
+    }
+
+    /// The deepest level has nowhere to go, so it must never be returned.
+    #[test]
+    fn the_deepest_level_never_compacts_onward() {
+        let mut scheme = HorizontalLeveling::new(3);
+        let tree = full_tree(3);
+
+        for _ in 0..200 {
+            scheme.note_flush();
+            while let Some(level) = scheme.next_compaction(&tree) {
+                assert!(level < 2, "level {level} is the deepest and cannot compact");
             }
         }
     }
 
+    /// An empty level satisfies the counter condition but has nothing to move.
+    /// Firing anyway would advance the schedule past data that never existed.
     #[test]
-    fn enormous_data_sizes_do_not_overflow() {
-        let scheme = Horizontal::new(7, 10, 1024);
-        let bottom = scheme.level_capacity_bytes(6, u64::MAX);
-        // The bottom level should still be ~90% of the total. Anything small
-        // here means the u128 intermediate wrapped or truncated.
-        assert!(
-            bottom > u64::MAX / 2,
-            "bottom level came out as {bottom}, which means the arithmetic overflowed"
+    fn an_empty_level_does_not_fire_or_disturb_the_counters() {
+        let mut scheme = HorizontalLeveling::new(2);
+        let empty = TreeShape {
+            levels: vec![LevelShape::default(), LevelShape::default()],
+        };
+
+        scheme.note_flush();
+        assert_eq!(scheme.next_compaction(&empty), None);
+        assert_eq!(
+            scheme.counters(),
+            &[1, 0],
+            "the counters must not advance for a compaction that did not happen"
         );
     }
 
+    /// Each flush drives a single ascending pass, not a loop to quiescence.
     #[test]
-    #[should_panic(expected = "at least one level")]
-    fn zero_levels_is_rejected() {
-        Horizontal::new(0, 10, 1024);
+    fn one_flush_yields_at_most_one_compaction_per_level() {
+        let mut scheme = HorizontalLeveling::new(4);
+        let tree = full_tree(4);
+
+        for _ in 0..50 {
+            scheme.note_flush();
+            let mut seen = Vec::new();
+            while let Some(level) = scheme.next_compaction(&tree) {
+                assert!(
+                    !seen.contains(&level),
+                    "level {level} fired twice in one flush: {seen:?}"
+                );
+                seen.push(level);
+            }
+            assert!(
+                seen.windows(2).all(|pair| pair[0] < pair[1]),
+                "the pass must ascend: {seen:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "at least 2 levels")]
+    fn a_single_level_tree_is_rejected() {
+        HorizontalLeveling::new(1);
     }
 }

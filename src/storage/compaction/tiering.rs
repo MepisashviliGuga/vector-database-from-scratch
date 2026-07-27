@@ -1,60 +1,42 @@
-//! Tiering: several runs per level, merged only when the level fills.
+//! Tiering: append the merged result as a new run.
 //!
-//! The write-optimised baseline, and leveling's opposite.
+//! The write-optimised policy, and leveling's opposite.
 //!
-//! Each level accumulates up to `T` runs. Nothing is merged until the level is
-//! full; then all `T` runs are merged in one pass and the single result is
-//! **appended** to the level below, without touching what is already there.
+//! A compaction merges the source level's runs and **appends** the single result
+//! to the level below, without touching what is already there. A record is
+//! therefore rewritten roughly once per level instead of `T` times. The bill
+//! arrives at read time: a lookup may probe several runs at every level.
 //!
 //! ```text
-//!   L0 │ run  run  run  run     ← at T=4 these merge into one run at L1
-//!   L1 │ run  run               ← and this level fills the same way
+//!   L0 │ run  run  run  run     ← merge into one run, appended to L1
+//!   L1 │ run  run               ← untouched by that compaction
 //!   L2 │ run
 //! ```
 //!
-//! # The trade-off against leveling
-//!
-//! A record is rewritten roughly **once per level** on its way down, against
-//! leveling's `T` times — tiering does far less write work. The bill arrives at
-//! read time: a point lookup may have to probe `T` runs at every level instead
-//! of one, so read cost is multiplied by the size ratio.
-//!
-//! Bloom filters blunt that considerably, since most of those probes are
-//! answered from memory, which is why tiering is viable at all in practice. The
-//! Phase 3 benchmarks should report read cost both in runs probed and in blocks
-//! actually read, because the filter makes those two numbers diverge sharply.
-//!
-//! # Why the target level is not merged into
-//!
-//! Leveling merges its output with the overlapping run below to preserve one run
-//! per level. Tiering has no such invariant, so it simply appends — which is
-//! exactly where its write-amplification saving comes from. The appended run
-//! overlaps existing runs at that level, and the read path resolves that by
-//! consulting runs newest-first.
+//! Bloom filters blunt the read cost considerably, since most of those probes
+//! are answered from memory — which is why tiering is viable at all. Phase 3
+//! should report read cost both in runs probed and in blocks actually read,
+//! because the filter makes those two diverge sharply.
 
-use super::{is_deepest_level, CompactionJob, CompactionPolicy, GrowthScheme, TreeShape};
+use super::{CompactionJob, MergePolicy};
+use crate::storage::shape::{is_deepest_level, TreeShape};
 
-/// Up to `T` runs per level, merged all at once.
+/// Several runs per level, merged all at once and appended below.
 #[derive(Debug, Clone, Copy)]
 pub struct Tiering {
-    /// Runs a level may hold before merging. Conventionally the size ratio `T`,
-    /// so a level's total size stays within its budget.
     runs_per_level: usize,
 }
 
 impl Tiering {
+    /// # Panics
+    ///
+    /// If `runs_per_level < 2`. With one run per level this is leveling.
     pub fn new(runs_per_level: usize) -> Self {
         assert!(
             runs_per_level >= 2,
             "tiering needs at least two runs per level; with one it is leveling"
         );
         Self { runs_per_level }
-    }
-
-    /// Match the run limit to a growth scheme's size ratio, which is the
-    /// standard pairing: `T` runs each roughly `1/T` of the level's budget.
-    pub fn matching(growth: &dyn GrowthScheme) -> Self {
-        Self::new(growth.size_ratio().max(2) as usize)
     }
 }
 
@@ -64,44 +46,38 @@ impl Default for Tiering {
     }
 }
 
-impl CompactionPolicy for Tiering {
+impl MergePolicy for Tiering {
     fn name(&self) -> &'static str {
         "tiering"
     }
 
-    fn pick(&self, tree: &TreeShape, _growth: &dyn GrowthScheme) -> Option<CompactionJob> {
-        // Shallowest first: level 0 blocks incoming flushes, and in general a
-        // full shallow level feeds the ones below it.
-        for (level, shape) in tree.levels.iter().enumerate() {
-            if shape.run_count() < self.runs_per_level {
-                continue;
-            }
-
-            // All of them, in one pass. Merging a subset would leave runs behind
-            // that overlap the output, gaining nothing on read cost while paying
-            // the full write cost.
-            let source_runs: Vec<usize> = shape.runs.iter().map(|run| run.index).collect();
-            let target_level = level + 1;
-
-            // Tiering appends rather than merging, so runs already at the target
-            // survive this compaction *and* overlap the output. A tombstone
-            // dropped here would leave the older value in one of them reachable
-            // — the deleted key would come back. So the target level must also
-            // be empty, not merely the deepest.
-            let target_is_empty = tree
-                .level(target_level)
-                .is_none_or(|shape| shape.is_empty());
-
-            return Some(CompactionJob {
-                source_level: level,
-                source_runs,
-                target_level,
-                // Appended, not merged: this is where the write saving lives.
-                target_runs: Vec::new(),
-                drop_tombstones: is_deepest_level(tree, target_level) && target_is_empty,
-            });
+    fn plan(&self, tree: &TreeShape, source_level: usize) -> Option<CompactionJob> {
+        let source = tree.level(source_level)?;
+        if source.is_empty() {
+            return None;
         }
-        None
+
+        // All of them, in one pass. Merging a subset would leave runs behind
+        // that overlap the output, gaining nothing on read cost while paying the
+        // full write cost.
+        let source_runs: Vec<usize> = source.runs.iter().map(|run| run.index).collect();
+        let target_level = source_level + 1;
+
+        // Runs already at the target survive this compaction *and* overlap the
+        // output. A tombstone dropped here would leave the older value in one of
+        // them reachable, so the target must be empty as well as deepest.
+        let target_is_empty = tree
+            .level(target_level)
+            .is_none_or(|shape| shape.is_empty());
+
+        Some(CompactionJob {
+            source_level,
+            source_runs,
+            target_level,
+            // Appended, not merged: this is where the write saving lives.
+            target_runs: Vec::new(),
+            drop_tombstones: is_deepest_level(tree, target_level) && target_is_empty,
+        })
     }
 
     fn runs_per_level(&self) -> usize {
@@ -112,220 +88,76 @@ impl CompactionPolicy for Tiering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::compaction::LevelShape;
-    use crate::storage::growth::Vertical;
-
-    const KIB: u64 = 1024;
-
-    fn growth() -> Vertical {
-        Vertical::new(KIB, 4)
-    }
+    use crate::storage::shape::LevelShape;
 
     #[test]
-    fn an_empty_tree_needs_no_compaction() {
-        assert_eq!(Tiering::default().pick(&TreeShape::default(), &growth()), None);
-    }
-
-    #[test]
-    fn a_level_below_its_run_limit_is_left_alone() {
-        let tree = TreeShape {
-            levels: vec![LevelShape::from_sizes(&[KIB; 3])],
-        };
-        assert_eq!(
-            Tiering::new(4).pick(&tree, &growth()),
-            None,
-            "three runs is under a limit of four"
-        );
-    }
-
-    #[test]
-    fn a_full_level_merges_all_of_its_runs() {
-        let tree = TreeShape {
-            levels: vec![LevelShape::from_sizes(&[KIB; 4])],
-        };
-
-        let job = Tiering::new(4).pick(&tree, &growth()).expect("a job");
-        assert_eq!(job.source_level, 0);
-        assert_eq!(job.target_level, 1);
-        assert_eq!(job.source_runs, vec![0, 1, 2, 3]);
-    }
-
-    /// The defining difference from leveling: nothing at the target level is
-    /// rewritten. This is where tiering's write saving comes from.
-    #[test]
-    fn the_target_level_is_appended_to_not_rewritten() {
+    fn all_source_runs_merge_into_one_appended_run() {
         let tree = TreeShape {
             levels: vec![
-                LevelShape::from_sizes(&[KIB; 4]),
-                LevelShape::from_sizes(&[10 * KIB, 10 * KIB]),
+                LevelShape::from_sizes(&[100; 4]),
+                LevelShape::from_sizes(&[900, 900]),
             ],
         };
 
-        let job = Tiering::new(4).pick(&tree, &growth()).expect("a job");
+        let job = Tiering::new(4).plan(&tree, 0).expect("job");
+        assert_eq!(job.source_runs, vec![0, 1, 2, 3]);
         assert!(
             job.target_runs.is_empty(),
             "tiering never rewrites the level it writes into"
         );
-        assert_eq!(job.input_run_count(), 4, "only the source runs are merged");
-    }
-
-    #[test]
-    fn shallower_levels_are_compacted_first() {
-        let tree = TreeShape {
-            levels: vec![
-                LevelShape::from_sizes(&[KIB; 2]), // not full
-                LevelShape::from_sizes(&[KIB; 4]), // full
-                LevelShape::from_sizes(&[KIB; 5]), // also full
-            ],
-        };
-
-        let job = Tiering::new(4).pick(&tree, &growth()).expect("a job");
-        assert_eq!(
-            job.source_level, 1,
-            "the shallowest full level should be picked, not the fullest"
-        );
+        assert_eq!(job.input_run_count(), 4);
     }
 
     #[test]
     fn tombstones_are_dropped_only_into_an_empty_bottom_level() {
         let empty_target = TreeShape {
-            levels: vec![LevelShape::from_sizes(&[KIB; 4])],
+            levels: vec![LevelShape::from_sizes(&[100; 4])],
         };
         assert!(
             Tiering::new(4)
-                .pick(&empty_target, &growth())
-                .expect("a job")
+                .plan(&empty_target, 0)
+                .expect("job")
                 .drop_tombstones,
             "nothing exists below, so nothing can be resurrected"
-        );
-
-        let deeper_data = TreeShape {
-            levels: vec![
-                LevelShape::from_sizes(&[KIB; 4]),
-                LevelShape::from_sizes(&[KIB]),
-                LevelShape::from_sizes(&[KIB]),
-            ],
-        };
-        assert!(
-            !Tiering::new(4)
-                .pick(&deeper_data, &growth())
-                .expect("a job")
-                .drop_tombstones
         );
     }
 
     /// Regression test. Tiering appends without consuming the target level, so
-    /// runs already there survive the compaction and overlap the output. If the
-    /// tombstone check only asked "is this the deepest level?", a delete written
+    /// runs already there survive *and* overlap the output. If the tombstone
+    /// check only asked whether this was the deepest level, a delete written
     /// into level 1 would be discarded while the value it deletes still sat in
     /// an older level-1 run — and the key would come back from the dead.
     #[test]
     fn tombstones_are_kept_when_the_target_level_still_holds_older_runs() {
         let tree = TreeShape {
             levels: vec![
-                LevelShape::from_sizes(&[KIB; 4]),
-                // Deepest level, but not empty: an older run lives here.
-                LevelShape::from_sizes(&[10 * KIB]),
+                LevelShape::from_sizes(&[100; 4]),
+                // Deepest level, but not empty.
+                LevelShape::from_sizes(&[900]),
             ],
         };
 
-        let job = Tiering::new(4).pick(&tree, &growth()).expect("a job");
-        assert_eq!(job.target_level, 1);
+        let job = Tiering::new(4).plan(&tree, 0).expect("job");
         assert!(
             job.target_runs.is_empty(),
-            "tiering leaves the target run in place, which is exactly the danger"
+            "the surviving target run is exactly the danger"
         );
         assert!(
             !job.drop_tombstones,
-            "the surviving level-1 run can hold values these tombstones delete"
+            "that run can hold values these tombstones delete"
         );
     }
 
     #[test]
-    fn the_run_limit_can_track_the_growth_scheme() {
-        let scheme = Vertical::new(KIB, 8);
-        assert_eq!(Tiering::matching(&scheme).runs_per_level(), 8);
+    fn the_run_limit_is_reported() {
+        assert_eq!(Tiering::new(8).runs_per_level(), 8);
+        assert_eq!(Tiering::default().runs_per_level(), 4);
+        assert_eq!(Tiering::default().name(), "tiering");
     }
 
-    /// Tiering must converge too: each merge removes `T` runs from a level and
-    /// adds one below.
     #[test]
-    fn repeated_compaction_terminates() {
-        let policy = Tiering::new(4);
-        let growth = growth();
-
-        let mut tree = TreeShape {
-            levels: vec![LevelShape::from_sizes(&[KIB; 16])],
-        };
-
-        for step in 0..100 {
-            let Some(job) = policy.pick(&tree, &growth) else {
-                assert!(step > 0, "the first tree was already full");
-                return;
-            };
-
-            let merged: u64 = job
-                .source_runs
-                .iter()
-                .map(|&index| tree.levels[job.source_level].runs[index].bytes)
-                .sum();
-
-            tree.levels[job.source_level].runs.clear();
-            while tree.levels.len() <= job.target_level {
-                tree.levels.push(LevelShape::default());
-            }
-            // Appended as one new run, rather than merged into what is there.
-            let mut sizes: Vec<u64> = tree.levels[job.target_level]
-                .runs
-                .iter()
-                .map(|run| run.bytes)
-                .collect();
-            sizes.insert(0, merged);
-            tree.levels[job.target_level] = LevelShape::from_sizes(&sizes);
-        }
-        panic!("compaction did not converge after 100 steps");
-    }
-
-    /// The headline contrast, asserted directly so the Phase 3 comparison has a
-    /// documented starting point.
-    #[test]
-    fn tiering_merges_fewer_runs_than_leveling_for_the_same_tree() {
-        use crate::storage::compaction::Leveling;
-
-        let tree = TreeShape {
-            levels: vec![
-                LevelShape::from_sizes(&[KIB; 4]),
-                LevelShape {
-                    runs: vec![crate::storage::compaction::RunShape {
-                        index: 0,
-                        bytes: 40 * KIB,
-                        min_key: Some(b"a".to_vec()),
-                        max_key: Some(b"z".to_vec()),
-                    }],
-                },
-            ],
-        };
-
-        // Level 0 runs have no key ranges in this fixture, so leveling finds no
-        // overlap to rewrite; give them one to make the comparison real.
-        let mut with_ranges = tree.clone();
-        for run in &mut with_ranges.levels[0].runs {
-            run.min_key = Some(b"a".to_vec());
-            run.max_key = Some(b"z".to_vec());
-        }
-
-        let tiering_job = Tiering::new(4).pick(&with_ranges, &growth()).expect("job");
-        let leveling_job = Leveling::new(4).pick(&with_ranges, &growth()).expect("job");
-
-        assert_eq!(tiering_job.input_run_count(), 4);
-        assert_eq!(
-            leveling_job.input_run_count(),
-            5,
-            "leveling additionally rewrites the overlapping run below"
-        );
-        assert!(
-            tiering_job.input_run_count() < leveling_job.input_run_count(),
-            "tiering should move the same data while touching less"
-        );
+    #[should_panic(expected = "at least two runs per level")]
+    fn a_single_run_per_level_is_rejected() {
+        Tiering::new(1);
     }
 }

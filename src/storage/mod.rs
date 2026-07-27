@@ -13,13 +13,15 @@ pub mod lsm;
 pub mod manifest;
 pub mod memtable;
 pub mod merge;
+pub mod shape;
 pub mod sstable;
 pub mod wal;
 
 pub use bloom::BloomFilter;
-pub use compaction::{CompactionJob, CompactionPolicy, Leveling, Tiering, TreeShape};
-pub use growth::{GrowthScheme, Horizontal, Vertical};
-pub use lsm::{LsmConfig, LsmStats, LsmTree, Run};
+pub use compaction::{CompactionJob, Leveling, MergePolicy, Tiering};
+pub use growth::{GrowthScheme, HorizontalLeveling, HorizontalTiering, Vertical};
+pub use lsm::{GrowthKind, LsmConfig, LsmStats, LsmTree, MergeKind, Run};
+pub use shape::{LevelShape, RunShape, TreeShape};
 pub use manifest::Manifest;
 pub use memtable::{MemTable, Value};
 pub use merge::MergeIterator;

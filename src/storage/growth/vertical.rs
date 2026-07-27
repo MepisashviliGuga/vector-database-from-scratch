@@ -1,42 +1,39 @@
 //! Vertical growth: fixed capacity per level, add levels as data grows.
 //!
-//! This is the classic scheme, used by RocksDB, LevelDB and WiredTiger, and the
+//! The classic scheme — RocksDB, LevelDB, WiredTiger, Cassandra — and the
 //! baseline paper 01 measures Vertiorizon against.
 //!
-//! Level `i` holds `base * T^i` bytes, forever. As the data set grows the tree
-//! grows *downward*, gaining a new level roughly every time the data multiplies
-//! by `T`:
-//!
-//! ```text
-//!   T = 10, base = 1 MiB
-//!
-//!   L0 │█                    1 MiB
-//!   L1 │██                  10 MiB
-//!   L2 │████               100 MiB
-//!   L3 │████████             1 GiB     ← added when the data passes ~1 GiB
-//!   L4 │████████████████    10 GiB     ← added when the data passes ~10 GiB
-//! ```
+//! Level `i` holds `B·T^(i+1)` bytes forever, where `B` is the memtable flush
+//! size. (Paper 01 indexes levels from 1 and writes `B·T^i`; this module indexes
+//! from 0, so the exponent shifts by one. Level 0 therefore holds `T` flushes
+//! before it merges down, which is the familiar level-0 trigger.) As data grows
+//! the tree grows *downward*, gaining a level roughly every time the data
+//! multiplies by `T`.
 //!
 //! # What it costs
 //!
-//! Level count grows as `log_T(N)`. Each level is somewhere a point lookup may
-//! have to probe, and a step every record must be merged through on its way
-//! down, so **both read cost and write cost grow with the logarithm of the data
-//! size**. Space is the scheme's strength: the bottom level dominates, so
-//! obsolete copies above it are a small fraction of the total.
+//! Level count grows as `log_T(N)`. Each level is somewhere a lookup may probe
+//! and a step every record is merged through, so read and write cost both grow
+//! with the logarithm of the data size.
 //!
-//! Paper 01's criticism is that this trade-off is not optimal — vertical pays
-//! more read cost than is theoretically necessary for the write cost it incurs.
-//! That claim is what Phase 3 measures.
+//! Its trigger is a *fixed* compaction frequency: equal-sized chunks merged down
+//! at a constant rate. Paper 01's Figure 3 shows why that is suboptimal — a
+//! compaction costs what the target level currently holds, so merging in equal
+//! chunks does the expensive merges as often as the cheap ones. Moving 60 MB in
+//! three equal steps writes 20 + 40 + 60 = 120 MB, where the horizontal
+//! schedule's 10, 20, 30 MB steps write 10 + 30 + 60 = 100 MB.
+//!
+//! Space is the scheme's strength, and the reason industry adopted it: fixed
+//! capacities permit *partial* compaction, merging a slice of a level rather
+//! than all of it.
 
-use super::{saturating_geometric, GrowthScheme};
+use super::{saturating_geometric, GrowthScheme, TreeShape};
 
 /// Fixed level capacities; the tree gains levels as it grows.
 #[derive(Debug, Clone, Copy)]
 pub struct Vertical {
-    /// Capacity of level 0. Conventionally a small multiple of the memtable
-    /// flush threshold, so a level-0 compaction merges a handful of runs.
-    base_level_bytes: u64,
+    /// Memtable flush size, `B` in the paper.
+    buffer_bytes: u64,
     /// Ratio `T` between consecutive level capacities.
     size_ratio: u64,
 }
@@ -44,23 +41,45 @@ pub struct Vertical {
 impl Vertical {
     /// # Panics
     ///
-    /// If `size_ratio < 2`. A ratio of 1 would make every level the same size,
-    /// so the tree could never accommodate growth by adding levels — it would
-    /// add them without bound and never converge.
-    pub fn new(base_level_bytes: u64, size_ratio: u64) -> Self {
+    /// If `size_ratio < 2`. A ratio of 1 makes every level the same size, so the
+    /// tree could never accommodate growth by adding levels.
+    pub fn new(buffer_bytes: u64, size_ratio: u64) -> Self {
         assert!(
             size_ratio >= 2,
             "size ratio must be at least 2, got {size_ratio}"
         );
-        assert!(base_level_bytes > 0, "base level capacity must be positive");
+        assert!(buffer_bytes > 0, "buffer size must be positive");
         Self {
-            base_level_bytes,
+            buffer_bytes,
             size_ratio,
         }
     }
 
-    pub fn base_level_bytes(&self) -> u64 {
-        self.base_level_bytes
+    /// Bytes level `level` may hold: `B·T^(level+1)`.
+    pub fn level_capacity_bytes(&self, level: usize) -> u64 {
+        saturating_geometric(self.buffer_bytes, self.size_ratio, level + 1)
+    }
+
+    /// Levels needed to hold `total_bytes`.
+    ///
+    /// Walks capacities rather than taking a logarithm: `f64::log` on byte counts
+    /// near [`u64::MAX`] loses precision exactly where an off-by-one adds a
+    /// spurious level.
+    pub fn levels_needed(&self, total_bytes: u64) -> usize {
+        if total_bytes == 0 {
+            return 1;
+        }
+        let mut levels = 1usize;
+        let mut bottom = self.level_capacity_bytes(0);
+        while bottom < total_bytes && bottom != u64::MAX {
+            bottom = bottom.saturating_mul(self.size_ratio);
+            levels += 1;
+        }
+        levels
+    }
+
+    pub fn size_ratio(&self) -> u64 {
+        self.size_ratio
     }
 }
 
@@ -69,107 +88,147 @@ impl GrowthScheme for Vertical {
         "vertical"
     }
 
-    /// `base * T^level`, independent of how much data exists.
-    fn level_capacity_bytes(&self, level: usize, _total_bytes: u64) -> u64 {
-        saturating_geometric(self.base_level_bytes, self.size_ratio, level)
-    }
+    /// Nothing to record: the vertical trigger reads the tree's byte sizes
+    /// directly rather than counting events.
+    fn note_flush(&mut self) {}
 
-    /// Enough levels that the bottom one can hold the whole data set.
+    /// The shallowest level at or over its capacity.
     ///
-    /// Computed by walking capacities rather than with a logarithm, because
-    /// `f64::log` on byte counts near `u64::MAX` loses precision exactly where
-    /// an off-by-one adds a spurious level.
-    fn target_level_count(&self, total_bytes: u64) -> usize {
-        if total_bytes == 0 {
-            return 1;
-        }
-        let mut levels = 1usize;
-        let mut bottom_capacity = self.base_level_bytes;
-        while bottom_capacity < total_bytes {
-            if bottom_capacity == u64::MAX {
-                break;
-            }
-            bottom_capacity = bottom_capacity.saturating_mul(self.size_ratio);
-            levels += 1;
-        }
-        levels
+    /// Rescans from level 0 each call rather than resuming where it left off,
+    /// because a compaction changes the sizes of two levels and may push the
+    /// target over its own capacity. Data only ever moves downward, so the
+    /// cascade terminates.
+    fn next_compaction(&mut self, tree: &TreeShape) -> Option<usize> {
+        (0..tree.levels.len()).find(|&level| {
+            let bytes = tree.level_bytes(level);
+            // Paper 01's running example (Figure 2, T=2) triggers at exactly
+            // capacity: level 1 holds 2 buffers, capacity 2 buffers, and merges.
+            // So the comparison is `>=`, not `>`.
+            bytes > 0 && bytes >= self.level_capacity_bytes(level)
+        })
     }
 
-    fn size_ratio(&self) -> u64 {
-        self.size_ratio
+    /// Unbounded: the scheme adds levels as needed.
+    fn max_levels(&self) -> Option<usize> {
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::shape::LevelShape;
 
     const MIB: u64 = 1024 * 1024;
 
-    #[test]
-    fn capacities_grow_geometrically() {
-        let scheme = Vertical::new(MIB, 10);
-        assert_eq!(scheme.level_capacity_bytes(0, 0), MIB);
-        assert_eq!(scheme.level_capacity_bytes(1, 0), 10 * MIB);
-        assert_eq!(scheme.level_capacity_bytes(2, 0), 100 * MIB);
-        assert_eq!(scheme.level_capacity_bytes(3, 0), 1000 * MIB);
+    /// Build a tree whose levels hold the given byte counts.
+    fn tree(level_bytes: &[u64]) -> TreeShape {
+        TreeShape {
+            levels: level_bytes
+                .iter()
+                .map(|&bytes| {
+                    if bytes == 0 {
+                        LevelShape::default()
+                    } else {
+                        LevelShape::from_sizes(&[bytes])
+                    }
+                })
+                .collect(),
+        }
     }
 
-    /// The defining property: capacities do not depend on the data size. This is
-    /// exactly what horizontal inverts.
+    #[test]
+    fn capacities_grow_geometrically_from_the_buffer_size() {
+        let scheme = Vertical::new(MIB, 10);
+        assert_eq!(scheme.level_capacity_bytes(0), 10 * MIB);
+        assert_eq!(scheme.level_capacity_bytes(1), 100 * MIB);
+        assert_eq!(scheme.level_capacity_bytes(2), 1000 * MIB);
+    }
+
+    /// The defining property, and exactly what horizontal inverts: capacities do
+    /// not depend on how much data exists.
     #[test]
     fn capacities_ignore_the_data_size() {
         let scheme = Vertical::new(MIB, 10);
-        for total in [0, MIB, 1000 * MIB, u64::MAX] {
-            assert_eq!(scheme.level_capacity_bytes(2, total), 100 * MIB);
-        }
+        let small = tree(&[MIB]);
+        let huge = tree(&[MIB, 1000 * MIB, 100_000 * MIB]);
+        assert_eq!(scheme.level_capacity_bytes(1), 100 * MIB);
+        // Same capacity regardless; only whether it is exceeded differs.
+        assert_eq!(Vertical::new(MIB, 10).next_compaction(&small), None);
+        assert!(Vertical::new(MIB, 10).next_compaction(&huge).is_some());
     }
 
     #[test]
     fn levels_are_added_as_data_grows() {
         let scheme = Vertical::new(MIB, 10);
-
-        assert_eq!(scheme.target_level_count(0), 1);
-        assert_eq!(scheme.target_level_count(MIB), 1, "exactly full needs no new level");
-        assert_eq!(scheme.target_level_count(MIB + 1), 2);
-        assert_eq!(scheme.target_level_count(10 * MIB), 2);
-        assert_eq!(scheme.target_level_count(10 * MIB + 1), 3);
-        assert_eq!(scheme.target_level_count(100 * MIB), 3);
+        assert_eq!(scheme.levels_needed(0), 1);
+        assert_eq!(scheme.levels_needed(10 * MIB), 1);
+        assert_eq!(scheme.levels_needed(10 * MIB + 1), 2);
+        assert_eq!(scheme.levels_needed(100 * MIB), 2);
+        assert_eq!(scheme.levels_needed(100 * MIB + 1), 3);
     }
 
-    /// Level count should track `log_T(N)`: a thousandfold more data buys three
-    /// more levels at `T = 10`, not thirty.
     #[test]
     fn level_count_is_logarithmic_in_the_data_size() {
         let scheme = Vertical::new(MIB, 10);
-        let small = scheme.target_level_count(MIB);
-        let thousand_times = scheme.target_level_count(1000 * MIB);
-        assert_eq!(thousand_times - small, 3);
+        let base = scheme.levels_needed(10 * MIB);
+        assert_eq!(scheme.levels_needed(10_000 * MIB) - base, 3);
+        assert_eq!(scheme.levels_needed(10_000_000 * MIB) - base, 6);
+    }
 
-        let million_times = scheme.target_level_count(1_000_000 * MIB);
-        assert_eq!(million_times - small, 6);
+    /// **Paper 01, Figure 2, vertical scheme with T = 2.**
+    ///
+    /// Level 1 (our level 0) holds 2 buffers, level 2 holds 4. The paper's trace:
+    /// at `n = 2` level 1 reaches capacity and merges into level 2; at `n = 4`
+    /// level 1 merges again, level 2 then reaches *its* capacity and merges into
+    /// a newly created level 3.
+    ///
+    /// Reproducing the trace pins this implementation against the source rather
+    /// than against a reading of it.
+    #[test]
+    fn reproduces_the_papers_vertical_trace() {
+        // One buffer is 1 unit; T = 2, so level 0 holds 2 and level 1 holds 4.
+        let mut scheme = Vertical::new(1, 2);
+        assert_eq!(scheme.level_capacity_bytes(0), 2);
+        assert_eq!(scheme.level_capacity_bytes(1), 4);
+
+        // n = 1: one buffer in level 0, under its capacity of 2.
+        scheme.note_flush();
+        assert_eq!(scheme.next_compaction(&tree(&[1])), None);
+
+        // n = 2: level 0 reaches capacity and merges into level 1.
+        scheme.note_flush();
+        assert_eq!(scheme.next_compaction(&tree(&[2])), Some(0));
+
+        // n = 3: level 0 holds one buffer again, level 1 holds two.
+        scheme.note_flush();
+        assert_eq!(scheme.next_compaction(&tree(&[1, 2])), None);
+
+        // n = 4: level 0 is full again and merges down...
+        scheme.note_flush();
+        assert_eq!(scheme.next_compaction(&tree(&[2, 2])), Some(0));
+        // ...which fills level 1 to its capacity of 4, so it cascades into a
+        // newly created level 2.
+        assert_eq!(scheme.next_compaction(&tree(&[0, 4])), Some(1));
+        assert_eq!(scheme.next_compaction(&tree(&[0, 0, 4])), None);
     }
 
     #[test]
-    fn a_larger_ratio_means_fewer_levels() {
-        let shallow = Vertical::new(MIB, 100);
-        let steep = Vertical::new(MIB, 2);
-        let data = 10_000 * MIB;
-        assert!(
-            shallow.target_level_count(data) < steep.target_level_count(data),
-            "a bigger fanout should need fewer levels for the same data"
+    fn the_shallowest_over_capacity_level_is_picked_first() {
+        let mut scheme = Vertical::new(1, 2);
+        // Both level 0 (cap 2) and level 1 (cap 4) are over budget.
+        assert_eq!(
+            scheme.next_compaction(&tree(&[3, 9])),
+            Some(0),
+            "data should move down one step at a time"
         );
     }
 
     #[test]
-    fn enormous_data_sizes_do_not_overflow_or_hang() {
-        let scheme = Vertical::new(1, 2);
-        let levels = scheme.target_level_count(u64::MAX);
-        assert!(
-            (60..=70).contains(&levels),
-            "doubling from 1 byte should reach u64::MAX in ~64 levels, got {levels}"
-        );
-        assert_eq!(scheme.level_capacity_bytes(200, u64::MAX), u64::MAX);
+    fn an_empty_level_never_triggers() {
+        let mut scheme = Vertical::new(1, 2);
+        assert_eq!(scheme.next_compaction(&tree(&[0, 0, 0])), None);
+        assert_eq!(scheme.next_compaction(&TreeShape::default()), None);
     }
 
     #[test]

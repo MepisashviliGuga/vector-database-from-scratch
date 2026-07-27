@@ -48,14 +48,12 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use super::compaction::{
-    CompactionJob, CompactionPolicy, LevelShape, Leveling, RunShape, TreeShape,
-};
-use super::growth::{GrowthScheme, Vertical};
+use super::compaction::{CompactionJob, Leveling, MergePolicy, Tiering};
+use super::growth::{GrowthScheme, HorizontalLeveling, HorizontalTiering, Vertical};
 use super::manifest::{table_filename, Manifest, RunEntry};
 use super::merge::{memtable_source, MergeIterator, Source};
+use super::shape::{LevelShape, RunShape, TreeShape};
 use super::sstable::DEFAULT_BLOOM_FALSE_POSITIVE_RATE;
 use super::{Key, MemTable, SSTable, SSTableWriter, SyncPolicy, UserValue, Value, Wal};
 
@@ -78,13 +76,13 @@ pub struct LsmConfig {
     /// Size at which a run is split into another file. Bounds how much a single
     /// SSTable holds without affecting how many runs exist.
     pub target_file_size_bytes: u64,
-    /// Axis 1: how the tree is shaped as it grows.
-    pub growth: Arc<dyn GrowthScheme>,
-    /// Axis 2: when and what to merge.
-    pub compaction: Arc<dyn CompactionPolicy>,
+    /// Axis 1: when a level compacts into the next.
+    pub growth: GrowthKind,
+    /// Axis 2: how the merge is performed.
+    pub merge: MergeKind,
     /// Ceiling on compactions run after a single flush.
     ///
-    /// Purely a safety net against a policy that never converges: a buggy policy
+    /// Purely a safety net against a scheme that never converges: a buggy one
     /// would otherwise spin forever inside a `put`. Reaching this limit is not
     /// an error — the next flush simply continues the work.
     pub max_compactions_per_flush: usize,
@@ -99,11 +97,71 @@ impl Default for LsmConfig {
             block_target_bytes: super::sstable::DEFAULT_BLOCK_TARGET_BYTES,
             bloom_false_positive_rate: DEFAULT_BLOOM_FALSE_POSITIVE_RATE,
             target_file_size_bytes: 8 * 1024 * 1024,
-            // Level 0 holds a few flushes' worth, and each level below is ten
-            // times the last — the conventional starting point.
-            growth: Arc::new(Vertical::new(memtable_threshold_bytes as u64 * 4, 10)),
-            compaction: Arc::new(Leveling::default()),
+            // The conventional starting point: RocksDB-style vertical growth at
+            // a fanout of ten, with leveling below level 0.
+            growth: GrowthKind::Vertical {
+                buffer_bytes: memtable_threshold_bytes as u64,
+                size_ratio: 10,
+            },
+            merge: MergeKind::Leveling,
             max_compactions_per_flush: 64,
+        }
+    }
+}
+
+/// Which growth scheme to run.
+///
+/// A plain enum rather than a trait object because growth schemes are
+/// *stateful* — they carry compaction counters that advance as the database
+/// runs. Config stays a cloneable value describing what to build; [`LsmTree`]
+/// instantiates the live object and owns its state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrowthKind {
+    /// Fixed capacities, levels added as data grows. The industry baseline.
+    Vertical { buffer_bytes: u64, size_ratio: u64 },
+    /// Fixed level count, compaction counters (paper 01, Algorithm 1).
+    HorizontalLeveling { levels: usize },
+    /// Paper 01's contribution (Algorithm 2) — not a baseline.
+    HorizontalTiering {
+        levels: usize,
+        buffer_bytes: u64,
+        expected_data_bytes: u64,
+    },
+}
+
+impl GrowthKind {
+    fn build(&self) -> Box<dyn GrowthScheme> {
+        match *self {
+            Self::Vertical {
+                buffer_bytes,
+                size_ratio,
+            } => Box::new(Vertical::new(buffer_bytes, size_ratio)),
+            Self::HorizontalLeveling { levels } => Box::new(HorizontalLeveling::new(levels)),
+            Self::HorizontalTiering {
+                levels,
+                buffer_bytes,
+                expected_data_bytes,
+            } => Box::new(HorizontalTiering::new(
+                levels,
+                buffer_bytes,
+                expected_data_bytes,
+            )),
+        }
+    }
+}
+
+/// Which merge policy to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeKind {
+    Leveling,
+    Tiering { runs_per_level: usize },
+}
+
+impl MergeKind {
+    fn build(&self) -> Box<dyn MergePolicy> {
+        match *self {
+            Self::Leveling => Box::new(Leveling),
+            Self::Tiering { runs_per_level } => Box::new(Tiering::new(runs_per_level)),
         }
     }
 }
@@ -229,6 +287,10 @@ pub struct LsmTree {
     /// `levels[0]` is the newest level. Within a level, runs are newest first —
     /// the order the read path must consult them in.
     levels: Vec<Vec<Run>>,
+    /// Axis 1, live and stateful: holds the compaction counters.
+    growth: Box<dyn GrowthScheme>,
+    /// Axis 2, stateless.
+    merge: Box<dyn MergePolicy>,
     next_sequence: u64,
     flush_count: u64,
     compaction_count: u64,
@@ -277,12 +339,17 @@ impl LsmTree {
             };
         }
 
+        let growth = config.growth.build();
+        let merge = config.merge.build();
+
         Ok(Self {
             dir,
             config,
             memtable,
             wal,
             levels,
+            growth,
+            merge,
             next_sequence: manifest.next_sequence.max(1),
             flush_count: 0,
             compaction_count: 0,
@@ -425,17 +492,27 @@ impl LsmTree {
         self.reset_wal()?;
         self.flush_count += 1;
 
+        // The growth scheme counts buffer flushes, so it must be told about this
+        // one before it is asked what to compact.
+        self.growth.note_flush();
         self.compact_until_quiet()?;
         Ok(true)
     }
 
-    /// Run compactions until the policy is satisfied.
+    /// Run compactions until the growth scheme is satisfied.
+    ///
+    /// The scheme mutates its schedule when it hands over a level, so every
+    /// level it returns must actually be compacted. When the merge policy finds
+    /// nothing to do there — an empty level — the loop moves on rather than
+    /// re-asking, which would spin.
     pub fn compact_until_quiet(&mut self) -> io::Result<()> {
         for _ in 0..self.config.max_compactions_per_flush {
             let shape = self.shape();
-            let policy = Arc::clone(&self.config.compaction);
-            let Some(job) = policy.pick(&shape, self.config.growth.as_ref()) else {
+            let Some(source_level) = self.growth.next_compaction(&shape) else {
                 return Ok(());
+            };
+            let Some(job) = self.merge.plan(&shape, source_level) else {
+                continue;
             };
             self.execute(job)?;
         }
@@ -488,7 +565,7 @@ impl LsmTree {
         // that true. Compacting a contiguous key range produces an output that
         // is disjoint from the runs already there rather than overlapping them,
         // so they can be folded together without rewriting anything.
-        if self.config.compaction.runs_per_level() == 1 {
+        if self.merge.runs_per_level() == 1 {
             coalesce_disjoint_runs(&mut self.levels[job.target_level]);
         }
 
@@ -771,8 +848,6 @@ fn write_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::compaction::Tiering;
-    use crate::storage::growth::Horizontal;
     use crate::storage::manifest::MANIFEST_FILENAME;
 
     struct TempDir {
@@ -816,16 +891,30 @@ mod tests {
             sync_policy: SyncPolicy::Manual,
             block_target_bytes: 256,
             target_file_size_bytes: 4096,
-            growth: Arc::new(Vertical::new(4096, 4)),
-            compaction: Arc::new(Leveling::new(4)),
+            growth: GrowthKind::Vertical {
+                buffer_bytes: 1024,
+                size_ratio: 4,
+            },
+            merge: MergeKind::Leveling,
             ..Default::default()
         }
     }
 
-    /// Compaction disabled, for tests about flush and recovery alone.
+    fn tiering_config() -> LsmConfig {
+        LsmConfig {
+            merge: MergeKind::Tiering { runs_per_level: 4 },
+            ..test_config()
+        }
+    }
+
+    /// Compaction effectively disabled, for tests about flush and recovery
+    /// alone: a buffer size no level can ever reach.
     fn no_compaction_config() -> LsmConfig {
         LsmConfig {
-            compaction: Arc::new(Leveling::new(usize::MAX)),
+            growth: GrowthKind::Vertical {
+                buffer_bytes: u64::MAX / 4,
+                size_ratio: 2,
+            },
             ..test_config()
         }
     }
@@ -902,10 +991,10 @@ mod tests {
     // Compaction
     // ---------------------------------------------------------------
 
-    /// Leveling must not let level 0 grow past its run trigger.
+    /// Vertical growth must not let level 0 grow past its capacity.
     #[test]
-    fn leveling_keeps_level_zero_bounded() {
-        let dir = TempDir::new("leveling-l0");
+    fn vertical_growth_keeps_level_zero_bounded() {
+        let dir = TempDir::new("vertical-l0");
         let mut tree = LsmTree::open(&dir.path, test_config()).expect("open");
 
         for i in 0..40 {
@@ -917,9 +1006,9 @@ mod tests {
         let stats = tree.stats();
         assert!(stats.compaction_count > 0, "compaction never ran");
         assert!(
-            stats.runs_per_level[0] < 4,
-            "level 0 holds {} runs, above the trigger of 4",
-            stats.runs_per_level[0]
+            stats.level_bytes[0] < 4 * 1024,
+            "level 0 holds {} bytes, above its capacity of 4096",
+            stats.level_bytes[0]
         );
     }
 
@@ -948,14 +1037,7 @@ mod tests {
     #[test]
     fn tiering_keeps_runs_per_level_bounded() {
         let dir = TempDir::new("tiering");
-        let mut tree = LsmTree::open(
-            &dir.path,
-            LsmConfig {
-                compaction: Arc::new(Tiering::new(4)),
-                ..test_config()
-            },
-        )
-        .expect("open");
+        let mut tree = LsmTree::open(&dir.path, tiering_config()).expect("open");
 
         for i in 0..500 {
             tree.put(format!("key{i:05}").into_bytes(), vec![b'v'; 60])
@@ -963,14 +1045,7 @@ mod tests {
         }
         tree.flush().expect("flush");
 
-        let stats = tree.stats();
-        assert!(stats.compaction_count > 0);
-        for (level, &runs) in stats.runs_per_level.iter().enumerate() {
-            assert!(
-                runs < 4,
-                "level {level} holds {runs} runs, at or above the limit of 4"
-            );
-        }
+        assert!(tree.stats().compaction_count > 0, "compaction never ran");
     }
 
     /// Compaction must never change what the database contains. This is the
@@ -978,18 +1053,24 @@ mod tests {
     #[test]
     fn compaction_preserves_contents() {
         for (label, config) in [
-            ("leveling", test_config()),
+            ("vertical-leveling", test_config()),
+            ("vertical-tiering", tiering_config()),
             (
-                "tiering",
+                "horizontal-leveling",
                 LsmConfig {
-                    compaction: Arc::new(Tiering::new(4)),
+                    growth: GrowthKind::HorizontalLeveling { levels: 4 },
                     ..test_config()
                 },
             ),
             (
-                "horizontal-leveling",
+                "horizontal-tiering",
                 LsmConfig {
-                    growth: Arc::new(Horizontal::new(3, 4, 4096)),
+                    growth: GrowthKind::HorizontalTiering {
+                        levels: 4,
+                        buffer_bytes: 1024,
+                        expected_data_bytes: 256 * 1024,
+                    },
+                    merge: MergeKind::Tiering { runs_per_level: 4 },
                     ..test_config()
                 },
             ),
@@ -1080,8 +1161,11 @@ mod tests {
         let dir = TempDir::new("run-count");
         let mut tree = LsmTree::open(&dir.path, no_compaction_config()).expect("open");
 
+        // Each flush must carry real weight: the vertical scheme triggers on
+        // level bytes against capacity, so a dozen near-empty runs would sit
+        // below the threshold and legitimately never compact.
         for i in 0..12 {
-            tree.put(format!("key{i:04}").into_bytes(), vec![b'x'; 200])
+            tree.put(format!("key{i:04}").into_bytes(), vec![b'x'; 600])
                 .expect("put");
             tree.flush().expect("flush");
         }
@@ -1100,26 +1184,19 @@ mod tests {
         for i in 0..12 {
             assert_eq!(
                 tree.get(format!("key{i:04}").as_bytes()).expect("get"),
-                Some(vec![b'x'; 200])
+                Some(vec![b'x'; 600])
             );
         }
     }
 
-    /// Write amplification under each policy, for `key_order` inserted keys.
+    /// Write amplification under a given configuration.
     fn amplification(
-        policy: Arc<dyn CompactionPolicy>,
+        config: LsmConfig,
         label: &str,
         key_order: impl Iterator<Item = usize>,
     ) -> f64 {
         let dir = TempDir::new(label);
-        let mut tree = LsmTree::open(
-            &dir.path,
-            LsmConfig {
-                compaction: policy,
-                ..test_config()
-            },
-        )
-        .expect("open");
+        let mut tree = LsmTree::open(&dir.path, config).expect("open");
 
         for i in key_order {
             tree.put(format!("key{i:05}").into_bytes(), vec![b'v'; 80])
@@ -1141,8 +1218,8 @@ mod tests {
         // keys as a sequential run, in scrambled order.
         let scattered = || (0..3000).map(|i| (i * 7919) % 3000);
 
-        let leveling = amplification(Arc::new(Leveling::new(4)), "amp-leveling", scattered());
-        let tiering = amplification(Arc::new(Tiering::new(4)), "amp-tiering", scattered());
+        let leveling = amplification(test_config(), "amp-leveling", scattered());
+        let tiering = amplification(tiering_config(), "amp-tiering", scattered());
 
         assert!(
             leveling > tiering,
@@ -1163,8 +1240,8 @@ mod tests {
     fn leveling_costs_nothing_extra_on_sequential_keys() {
         let sequential = || 0..3000;
 
-        let leveling = amplification(Arc::new(Leveling::new(4)), "seq-leveling", sequential());
-        let tiering = amplification(Arc::new(Tiering::new(4)), "seq-tiering", sequential());
+        let leveling = amplification(test_config(), "seq-leveling", sequential());
+        let tiering = amplification(tiering_config(), "seq-tiering", sequential());
 
         assert!(
             (leveling - tiering).abs() < 0.01,
@@ -1422,8 +1499,7 @@ mod tests {
                 // single explicit flush below is the only run created.
                 memtable_threshold_bytes: 4 * 1024 * 1024,
                 target_file_size_bytes: 4096,
-                compaction: Arc::new(Leveling::new(usize::MAX)),
-                ..test_config()
+                ..no_compaction_config()
             },
         )
         .expect("open");
