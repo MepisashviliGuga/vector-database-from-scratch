@@ -49,11 +49,11 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::compaction::{CompactionJob, Leveling, MergePolicy, Tiering};
+use super::compaction::{CompactionJob, Leveling, MergePolicy, RunFiles, Tiering};
 use super::growth::{GrowthScheme, HorizontalLeveling, HorizontalTiering, Vertical};
 use super::manifest::{table_filename, Manifest, RunEntry};
 use super::merge::{memtable_source, MergeIterator, Source};
-use super::shape::{LevelShape, RunShape, TreeShape};
+use super::shape::{FileShape, LevelShape, RunShape, TreeShape};
 use super::sstable::DEFAULT_BLOOM_FALSE_POSITIVE_RATE;
 use super::{Key, MemTable, SSTable, SSTableWriter, SyncPolicy, UserValue, Value, Wal};
 
@@ -261,13 +261,6 @@ impl Run {
     /// Every entry in ascending key order, tombstones included.
     fn source(&self) -> Source<'_> {
         Box::new(self.tables.iter().flat_map(SSTable::iter))
-    }
-
-    fn paths(&self) -> Vec<PathBuf> {
-        self.tables
-            .iter()
-            .map(|table| table.path().to_path_buf())
-            .collect()
     }
 
     fn reset_counters(&self) {
@@ -508,10 +501,13 @@ impl LsmTree {
     pub fn compact_until_quiet(&mut self) -> io::Result<()> {
         for _ in 0..self.config.max_compactions_per_flush {
             let shape = self.shape();
-            let Some(source_level) = self.growth.next_compaction(&shape) else {
+            let Some(request) = self.growth.next_compaction(&shape) else {
                 return Ok(());
             };
-            let Some(job) = self.merge.plan(&shape, source_level) else {
+            let Some(job) = self
+                .merge
+                .plan(&shape, request.level, request.granularity)
+            else {
                 continue;
             };
             self.execute(job)?;
@@ -520,24 +516,31 @@ impl LsmTree {
         Ok(())
     }
 
-    /// Merge the runs a job names and install the result.
+    /// Merge the files a job names and install the result.
     fn execute(&mut self, job: CompactionJob) -> io::Result<()> {
         // Take ownership of the inputs up front. Nothing else may reference them
-        // while the merge streams through.
-        let source_runs = take_runs(&mut self.levels[job.source_level], &job.source_runs);
-        let target_runs = match self.levels.get_mut(job.target_level) {
-            Some(level) => take_runs(level, &job.target_runs),
+        // while the merge streams through. Files are removed before empty runs
+        // are pruned, so the run indices the job named stay valid throughout.
+        let source_files = take_files(&mut self.levels[job.source_level], &job.sources);
+        let target_files = match self.levels.get_mut(job.target_level) {
+            Some(level) => take_files(level, &job.targets),
             None => Vec::new(),
         };
+        prune_empty_runs(&mut self.levels[job.source_level]);
+        if let Some(level) = self.levels.get_mut(job.target_level) {
+            prune_empty_runs(level);
+        }
 
         let sequence = self.take_sequence();
         let new_run = {
             // Newest first: sources sit at a shallower level, so they hold newer
-            // data than anything already at the target.
-            let mut sources: Vec<Source<'_>> = Vec::new();
-            for run in source_runs.iter().chain(target_runs.iter()) {
-                sources.push(run.source());
-            }
+            // data than anything already at the target. Each group's files are
+            // disjoint and ascending, so they concatenate into one sorted run.
+            let sources: Vec<Source<'_>> = source_files
+                .iter()
+                .chain(target_files.iter())
+                .map(|files| -> Source<'_> { Box::new(files.iter().flat_map(SSTable::iter)) })
+                .collect();
 
             let merged: Box<dyn Iterator<Item = io::Result<(Key, Value)>>> = if job.drop_tombstones
             {
@@ -573,12 +576,10 @@ impl LsmTree {
         // a crash before the unlink merely leaves garbage for the next startup.
         self.store_manifest()?;
 
-        for run in source_runs.iter().chain(target_runs.iter()) {
-            for path in run.paths() {
-                if let Err(error) = std::fs::remove_file(&path) {
-                    if error.kind() != io::ErrorKind::NotFound {
-                        return Err(error);
-                    }
+        for table in source_files.iter().chain(target_files.iter()).flatten() {
+            if let Err(error) = std::fs::remove_file(table.path()) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    return Err(error);
                 }
             }
         }
@@ -587,7 +588,7 @@ impl LsmTree {
         Ok(())
     }
 
-    /// The tree as the compaction policy sees it.
+    /// The tree as the growth scheme and merge policy see it.
     fn shape(&self) -> TreeShape {
         TreeShape {
             levels: self
@@ -597,11 +598,19 @@ impl LsmTree {
                     runs: runs
                         .iter()
                         .enumerate()
-                        .map(|(index, run)| RunShape {
-                            index,
-                            bytes: run.bytes(),
-                            min_key: run.min_key().cloned(),
-                            max_key: run.max_key().cloned(),
+                        .map(|(run_index, run)| RunShape {
+                            index: run_index,
+                            files: run
+                                .tables
+                                .iter()
+                                .enumerate()
+                                .map(|(file_index, table)| FileShape {
+                                    index: file_index,
+                                    bytes: table.file_size_bytes(),
+                                    min_key: table.min_key().cloned(),
+                                    max_key: table.max_key().cloned(),
+                                })
+                                .collect(),
                         })
                         .collect(),
                 })
@@ -716,32 +725,44 @@ impl LsmTree {
     }
 }
 
-/// Remove the runs at `indices`, returning them in the order given.
+/// Remove the files each selection names, returning them grouped and in the
+/// order the selections were given.
 ///
-/// Removal proceeds from the highest index down so earlier indices stay valid,
-/// then the result is reordered to match the caller's list — a policy names runs
-/// newest-first and the merge depends on that order.
-fn take_runs(level: &mut Vec<Run>, indices: &[usize]) -> Vec<Run> {
-    let mut sorted: Vec<usize> = indices.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
-
-    let mut taken: Vec<(usize, Run)> = Vec::with_capacity(sorted.len());
-    for &index in sorted.iter().rev() {
-        if index < level.len() {
-            taken.push((index, level.remove(index)));
-        }
-    }
-
-    indices
+/// The caller's order is the merge order — newest run first — so it is preserved
+/// exactly. Within a group, files come back ascending by key, which is the order
+/// they concatenate into a sorted stream.
+///
+/// Runs are *not* removed here even if they end up empty: doing so mid-loop
+/// would invalidate the run indices later selections refer to. Call
+/// [`prune_empty_runs`] once the taking is done.
+fn take_files(level: &mut [Run], selections: &[RunFiles]) -> Vec<Vec<SSTable>> {
+    selections
         .iter()
-        .filter_map(|wanted| {
+        .map(|selection| {
+            let Some(run) = level.get_mut(selection.run) else {
+                return Vec::new();
+            };
+
+            let mut indices: Vec<usize> = selection.files.clone();
+            indices.sort_unstable();
+            indices.dedup();
+
+            // Remove from the back so earlier indices stay valid.
+            let mut taken: Vec<SSTable> = Vec::with_capacity(indices.len());
+            for &index in indices.iter().rev() {
+                if index < run.tables.len() {
+                    taken.push(run.tables.remove(index));
+                }
+            }
+            taken.reverse();
             taken
-                .iter()
-                .position(|(index, _)| index == wanted)
-                .map(|position| taken.remove(position).1)
         })
         .collect()
+}
+
+/// Drop runs left with no files.
+fn prune_empty_runs(level: &mut Vec<Run>) {
+    level.retain(|run| !run.tables.is_empty());
 }
 
 /// Fold mutually disjoint runs in a level into a single run.
@@ -1228,25 +1249,35 @@ mod tests {
         );
     }
 
-    /// A finding worth pinning: with strictly ascending keys, every flush covers
-    /// a key range disjoint from every earlier one, so leveling finds nothing to
-    /// rewrite and costs exactly what tiering costs.
+    /// A finding worth pinning: leveling's extra cost comes entirely from
+    /// *overlap*, so it is a property of the workload rather than of the policy.
     ///
-    /// The read-write trade-off between the two policies is therefore a property
-    /// of the *workload*, not of the policies alone. Any Phase 3 benchmark that
-    /// only inserts sequential keys would show the two as identical and conclude,
-    /// wrongly, that the choice does not matter.
+    /// With strictly ascending keys, every flush covers a key range disjoint
+    /// from every earlier one, so a compaction finds nothing below to rewrite
+    /// and simply moves data down. Scatter the same keys and each run overlaps
+    /// what is already there, which is what leveling pays to merge away.
+    ///
+    /// Everything but the key order is held fixed here — same growth scheme,
+    /// same merge policy, same sizes — so the difference is attributable to the
+    /// workload alone. Any Phase 3 benchmark that only inserts sequential keys
+    /// would understate leveling's cost and could conclude, wrongly, that the
+    /// policy choice does not matter.
     #[test]
-    fn leveling_costs_nothing_extra_on_sequential_keys() {
-        let sequential = || 0..3000;
-
-        let leveling = amplification(test_config(), "seq-leveling", sequential());
-        let tiering = amplification(tiering_config(), "seq-tiering", sequential());
+    fn leveling_pays_for_overlap_not_for_volume() {
+        let sequential = amplification(test_config(), "seq-leveling", 0..3000);
+        // The same 3000 keys, scrambled: 7919 is coprime with 3000, so this is a
+        // permutation rather than a different data set.
+        let scattered = amplification(
+            test_config(),
+            "scattered-leveling",
+            (0..3000).map(|i| (i * 7919) % 3000),
+        );
 
         assert!(
-            (leveling - tiering).abs() < 0.01,
-            "with disjoint runs the two policies should do identical work, but \
-             leveling was {leveling:.2}x and tiering {tiering:.2}x"
+            scattered > sequential,
+            "identical data in scrambled order should cost more ({scattered:.2}x) \
+             than in ascending order ({sequential:.2}x), because only then is \
+             there overlapping data to rewrite"
         );
     }
 
@@ -1528,27 +1559,103 @@ mod tests {
         }
     }
 
+    /// Partial compaction moves a slice of a level at a time, so the tree must
+    /// still hold exactly the same data afterwards — and must actually have used
+    /// the partial path.
     #[test]
-    fn taking_runs_preserves_the_requested_order() {
-        fn dummy(sequence: u64) -> Run {
-            Run {
-                sequence,
-                tables: Vec::new(),
-            }
+    fn partial_compaction_preserves_contents() {
+        let dir = TempDir::new("partial");
+        let mut tree = LsmTree::open(
+            &dir.path,
+            LsmConfig {
+                // Small files, so a level holds many of them and slicing is
+                // meaningfully finer than taking the whole level.
+                target_file_size_bytes: 512,
+                ..test_config()
+            },
+        )
+        .expect("open");
+
+        let expected: Vec<(Key, UserValue)> = (0..1200)
+            .map(|i| (format!("key{i:05}").into_bytes(), vec![b'v'; 40]))
+            .collect();
+        for (key, value) in &expected {
+            tree.put(key.clone(), value.clone()).expect("put");
         }
+        tree.flush().expect("flush");
 
-        let mut level = vec![dummy(10), dummy(9), dummy(8), dummy(7)];
-        let taken = take_runs(&mut level, &[0, 2]);
+        let stats = tree.stats();
+        assert!(stats.compaction_count > 0, "compaction never ran");
+        assert!(
+            stats.file_count > stats.run_count,
+            "runs should be split across several files for slicing to matter"
+        );
 
-        assert_eq!(
-            taken.iter().map(Run::sequence).collect::<Vec<_>>(),
-            vec![10, 8],
-            "runs must come back in the order the policy asked for"
+        let live: Vec<_> = tree.iter().map(|entry| entry.expect("iter")).collect();
+        assert_eq!(live, expected);
+    }
+
+    #[test]
+    fn taking_files_preserves_the_requested_order() {
+        let dir = TempDir::new("take-files");
+        let mut tree = LsmTree::open(
+            &dir.path,
+            LsmConfig {
+                // Everything in one memtable, so the single flush below produces
+                // exactly one run, split into files at 4 KiB.
+                memtable_threshold_bytes: 4 * 1024 * 1024,
+                ..no_compaction_config()
+            },
+        )
+        .expect("open");
+
+        // One run spanning several files: the target file size is 4 KiB, so this
+        // needs well over 12 KiB of payload.
+        for i in 0..200 {
+            tree.put(format!("key{i:03}").into_bytes(), vec![b'v'; 300])
+                .expect("put");
+        }
+        tree.flush().expect("flush");
+
+        let files_before = tree.levels[0][0].tables.len();
+        assert!(files_before >= 3, "need several files to select among");
+
+        let taken = take_files(
+            &mut tree.levels[0],
+            &[RunFiles {
+                run: 0,
+                files: vec![0, 2],
+            }],
+        );
+
+        assert_eq!(taken.len(), 1, "one selection, one group");
+        assert_eq!(taken[0].len(), 2);
+        assert!(
+            taken[0][0].min_key() < taken[0][1].min_key(),
+            "files must come back ascending by key"
         );
         assert_eq!(
-            level.iter().map(Run::sequence).collect::<Vec<_>>(),
-            vec![9, 7],
-            "the untouched runs must remain, in order"
+            tree.levels[0][0].tables.len(),
+            files_before - 2,
+            "the untaken files must remain"
         );
+    }
+
+    #[test]
+    fn pruning_removes_only_emptied_runs() {
+        let dir = TempDir::new("prune");
+        let mut tree = LsmTree::open(&dir.path, no_compaction_config()).expect("open");
+        tree.put(k("a"), v("1")).expect("put");
+        tree.flush().expect("flush");
+        tree.put(k("b"), v("2")).expect("put");
+        tree.flush().expect("flush");
+        assert_eq!(tree.levels[0].len(), 2);
+
+        // Empty the newer run, leaving the older one intact.
+        tree.levels[0][0].tables.clear();
+        prune_empty_runs(&mut tree.levels[0]);
+
+        assert_eq!(tree.levels[0].len(), 1);
+        assert_eq!(tree.get(b"a").expect("get"), Some(v("1")));
     }
 }

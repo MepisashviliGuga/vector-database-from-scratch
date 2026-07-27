@@ -18,7 +18,7 @@
 //! should report read cost both in runs probed and in blocks actually read,
 //! because the filter makes those two diverge sharply.
 
-use super::{CompactionJob, MergePolicy};
+use super::{all_files, CompactionJob, Granularity, MergePolicy};
 use crate::storage::shape::{is_deepest_level, TreeShape};
 
 /// Several runs per level, merged all at once and appended below.
@@ -51,16 +51,25 @@ impl MergePolicy for Tiering {
         "tiering"
     }
 
-    fn plan(&self, tree: &TreeShape, source_level: usize) -> Option<CompactionJob> {
+    /// `granularity` is ignored: a tiering compaction always merges the whole
+    /// level.
+    ///
+    /// Slicing would gain nothing. Under tiering the source level's runs overlap
+    /// each other, so a key-range slice of one still overlaps the rest and the
+    /// level's run count — the thing read cost actually tracks — would not fall.
+    /// The caller would pay to rewrite data without buying a single probe back.
+    fn plan(
+        &self,
+        tree: &TreeShape,
+        source_level: usize,
+        _granularity: Granularity,
+    ) -> Option<CompactionJob> {
         let source = tree.level(source_level)?;
         if source.is_empty() {
             return None;
         }
 
-        // All of them, in one pass. Merging a subset would leave runs behind
-        // that overlap the output, gaining nothing on read cost while paying the
-        // full write cost.
-        let source_runs: Vec<usize> = source.runs.iter().map(|run| run.index).collect();
+        let sources = all_files(tree, source_level);
         let target_level = source_level + 1;
 
         // Runs already at the target survive this compaction *and* overlap the
@@ -72,10 +81,10 @@ impl MergePolicy for Tiering {
 
         Some(CompactionJob {
             source_level,
-            source_runs,
+            sources,
             target_level,
             // Appended, not merged: this is where the write saving lives.
-            target_runs: Vec::new(),
+            targets: Vec::new(),
             drop_tombstones: is_deepest_level(tree, target_level) && target_is_empty,
         })
     }
@@ -99,13 +108,31 @@ mod tests {
             ],
         };
 
-        let job = Tiering::new(4).plan(&tree, 0).expect("job");
-        assert_eq!(job.source_runs, vec![0, 1, 2, 3]);
+        let job = Tiering::new(4).plan(&tree, 0, Granularity::Full).expect("job");
+        assert_eq!(job.sources.len(), 4);
         assert!(
-            job.target_runs.is_empty(),
+            job.targets.is_empty(),
             "tiering never rewrites the level it writes into"
         );
         assert_eq!(job.input_run_count(), 4);
+    }
+
+    /// Granularity does not apply: a key-range slice of one run would still
+    /// overlap the others, so the level's run count would not fall.
+    #[test]
+    fn a_partial_request_still_merges_the_whole_level() {
+        let tree = TreeShape {
+            levels: vec![
+                LevelShape::from_sizes(&[100; 4]),
+                LevelShape::from_sizes(&[900]),
+            ],
+        };
+
+        let full = Tiering::new(4).plan(&tree, 0, Granularity::Full).expect("job");
+        let partial = Tiering::new(4)
+            .plan(&tree, 0, Granularity::Partial)
+            .expect("job");
+        assert_eq!(full, partial);
     }
 
     #[test]
@@ -115,7 +142,7 @@ mod tests {
         };
         assert!(
             Tiering::new(4)
-                .plan(&empty_target, 0)
+                .plan(&empty_target, 0, Granularity::Full)
                 .expect("job")
                 .drop_tombstones,
             "nothing exists below, so nothing can be resurrected"
@@ -137,9 +164,9 @@ mod tests {
             ],
         };
 
-        let job = Tiering::new(4).plan(&tree, 0).expect("job");
+        let job = Tiering::new(4).plan(&tree, 0, Granularity::Full).expect("job");
         assert!(
-            job.target_runs.is_empty(),
+            job.targets.is_empty(),
             "the surviving target run is exactly the danger"
         );
         assert!(

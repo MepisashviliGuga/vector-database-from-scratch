@@ -13,7 +13,10 @@
       "Bash(python *)",
       "PowerShell(cargo *)",
       "PowerShell(Remove-Item *)",
-      "PowerShell(Set-Location *)"
+      "PowerShell(Set-Location *)",
+      "PowerShell(Get-Location *)",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|^warning|-->\" | Select-Object -First 15; \"CLIPPY: $LASTEXITCODE\")",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 15; \"CLIPPY: $LASTEXITCODE\")"
     ]
   }
 }

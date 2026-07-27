@@ -49,7 +49,7 @@
 //! addresses by giving the bottom two levels to a vertical part that can compact
 //! partially.
 
-use super::{GrowthScheme, TreeShape};
+use super::{CompactionRequest, Granularity, GrowthScheme, TreeShape};
 
 /// Fixed level count, compaction driven by per-level counters.
 #[derive(Debug, Clone)]
@@ -99,7 +99,7 @@ impl GrowthScheme for HorizontalLeveling {
         self.scan_cursor = 0;
     }
 
-    fn next_compaction(&mut self, tree: &TreeShape) -> Option<usize> {
+    fn next_compaction(&mut self, tree: &TreeShape) -> Option<CompactionRequest> {
         // The deepest level never compacts onward; there is nothing below it.
         let last_source = self.counters.len().saturating_sub(1);
 
@@ -116,7 +116,14 @@ impl GrowthScheme for HorizontalLeveling {
                 }
                 self.counters[level + 1] += 1;
                 self.counters[level] = 0;
-                return Some(level);
+                return Some(CompactionRequest {
+                    level,
+                    // The scheme is *defined* on full compaction: the counters
+                    // measure whole-level merges, so slicing one would break the
+                    // correspondence between a counter tick and a level's worth
+                    // of data. This is also the source of its space cost.
+                    granularity: Granularity::Full,
+                });
             }
         }
         None
@@ -148,8 +155,13 @@ mod tests {
         let mut fired = Vec::new();
         for flush in 1..=flushes {
             scheme.note_flush();
-            while let Some(level) = scheme.next_compaction(&tree) {
-                if level == 0 {
+            while let Some(request) = scheme.next_compaction(&tree) {
+                assert_eq!(
+                    request.granularity,
+                    Granularity::Full,
+                    "the horizontal scheme is defined on full compaction"
+                );
+                if request.level == 0 {
                     fired.push(flush);
                 }
             }
@@ -184,7 +196,7 @@ mod tests {
 
         scheme.note_flush();
         assert_eq!(scheme.counters(), &[1, 0], "after the first flush");
-        assert_eq!(scheme.next_compaction(&tree), Some(0));
+        assert_eq!(scheme.next_compaction(&tree).map(|r| r.level), Some(0));
         assert_eq!(scheme.counters(), &[0, 1], "C_1 resets, C_2 increments");
 
         scheme.note_flush();
@@ -192,7 +204,7 @@ mod tests {
 
         scheme.note_flush();
         assert_eq!(scheme.counters(), &[2, 1]);
-        assert_eq!(scheme.next_compaction(&tree), Some(0));
+        assert_eq!(scheme.next_compaction(&tree).map(|r| r.level), Some(0));
         assert_eq!(scheme.counters(), &[0, 2]);
     }
 
@@ -237,8 +249,8 @@ mod tests {
 
         for _ in 0..40 {
             scheme.note_flush();
-            while let Some(level) = scheme.next_compaction(&tree) {
-                if level == 1 {
+            while let Some(request) = scheme.next_compaction(&tree) {
+                if request.level == 1 {
                     deep_fired += 1;
                 }
             }
@@ -254,8 +266,12 @@ mod tests {
 
         for _ in 0..200 {
             scheme.note_flush();
-            while let Some(level) = scheme.next_compaction(&tree) {
-                assert!(level < 2, "level {level} is the deepest and cannot compact");
+            while let Some(request) = scheme.next_compaction(&tree) {
+                assert!(
+                    request.level < 2,
+                    "level {} is the deepest and cannot compact",
+                    request.level
+                );
             }
         }
     }
@@ -287,12 +303,13 @@ mod tests {
         for _ in 0..50 {
             scheme.note_flush();
             let mut seen = Vec::new();
-            while let Some(level) = scheme.next_compaction(&tree) {
+            while let Some(request) = scheme.next_compaction(&tree) {
                 assert!(
-                    !seen.contains(&level),
-                    "level {level} fired twice in one flush: {seen:?}"
+                    !seen.contains(&request.level),
+                    "level {} fired twice in one flush: {seen:?}",
+                    request.level
                 );
-                seen.push(level);
+                seen.push(request.level);
             }
             assert!(
                 seen.windows(2).all(|pair| pair[0] < pair[1]),

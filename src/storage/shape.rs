@@ -1,49 +1,99 @@
 //! A read-only view of the tree's structure, shared by both design axes.
 //!
-//! The growth scheme (when to compact) and the merge policy (how) both need to
-//! see the tree, and neither should need the other. Putting the view here keeps
-//! them independent, which is what lets Phase 3 vary one while holding the other
-//! fixed.
+//! The growth scheme (when to compact, and at what granularity) and the merge
+//! policy (how to merge) both need to see the tree, and neither should need the
+//! other. Putting the view here keeps them independent, which is what lets
+//! Phase 3 vary one while holding the other fixed.
 //!
-//! # Runs, not files
+//! # Files, runs, levels
 //!
-//! A **run** is a sorted sequence with no duplicate keys, possibly split across
-//! several files with disjoint key ranges. Searching a run costs one probe
-//! whatever its file count, so read cost tracks *runs*; file count only bounds
-//! how much a compaction rewrites. Conflating them makes leveling look far more
-//! expensive than it is.
+//! A **run** is a sorted sequence with no duplicate keys, split across one or
+//! more **files** with disjoint key ranges. Searching a run costs one probe
+//! whatever its file count, so read cost tracks *runs*; file count bounds how
+//! finely a compaction can be sliced.
+//!
+//! That second point is why files appear here at all. Full compaction merges
+//! whole runs; partial compaction merges a few files and the ones they overlap
+//! below. Paper 01 shows the choice is not cosmetic — full compaction is the
+//! mechanism behind the horizontal scheme's space cost, since inputs cannot be
+//! freed until a merge of the entire level completes.
 
 use super::Key;
 
-/// One run's summary: enough to reason about size and overlap without touching
-/// the files.
+/// One file's summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunShape {
-    /// Position within its level, newest first.
+pub struct FileShape {
+    /// Position within its run, ascending by key.
     pub index: usize,
     pub bytes: u64,
-    /// `None` for an empty run, which cannot overlap anything.
     pub min_key: Option<Key>,
     pub max_key: Option<Key>,
 }
 
+impl FileShape {
+    /// Whether this file's range intersects the closed interval `[min, max]`.
+    pub fn overlaps_range(&self, min: &Key, max: &Key) -> bool {
+        match (&self.min_key, &self.max_key) {
+            (Some(self_min), Some(self_max)) => self_min <= max && min <= self_max,
+            _ => false,
+        }
+    }
+}
+
+/// One run's summary: its files, in ascending key order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunShape {
+    /// Position within its level, newest first.
+    pub index: usize,
+    pub files: Vec<FileShape>,
+}
+
 impl RunShape {
+    pub fn bytes(&self) -> u64 {
+        self.files.iter().map(|file| file.bytes).sum()
+    }
+
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Smallest key in the run, taken from its first file.
+    pub fn min_key(&self) -> Option<&Key> {
+        self.files.first().and_then(|file| file.min_key.as_ref())
+    }
+
+    /// Largest key in the run, taken from its last file.
+    pub fn max_key(&self) -> Option<&Key> {
+        self.files.last().and_then(|file| file.max_key.as_ref())
+    }
+
     /// Whether two runs' key ranges intersect.
     pub fn overlaps(&self, other: &RunShape) -> bool {
-        match (&self.min_key, &self.max_key, &other.min_key, &other.max_key) {
-            (Some(a_min), Some(a_max), Some(b_min), Some(b_max)) => {
-                a_min <= b_max && b_min <= a_max
-            }
+        match (other.min_key(), other.max_key()) {
+            (Some(min), Some(max)) => self.overlaps_range(min, max),
             _ => false,
         }
     }
 
     /// Whether this run intersects the closed interval `[min, max]`.
     pub fn overlaps_range(&self, min: &Key, max: &Key) -> bool {
-        match (&self.min_key, &self.max_key) {
+        match (self.min_key(), self.max_key()) {
             (Some(self_min), Some(self_max)) => self_min <= max && min <= self_max,
             _ => false,
         }
+    }
+
+    /// Indices of the files intersecting `[min, max]`.
+    pub fn files_overlapping(&self, min: &Key, max: &Key) -> Vec<usize> {
+        self.files
+            .iter()
+            .filter(|file| file.overlaps_range(min, max))
+            .map(|file| file.index)
+            .collect()
     }
 }
 
@@ -55,8 +105,8 @@ pub struct LevelShape {
 }
 
 impl LevelShape {
-    /// Build a level from run sizes alone, for tests that do not care about key
-    /// ranges.
+    /// Build a level of single-file runs from sizes alone, for tests that do not
+    /// care about key ranges.
     pub fn from_sizes(sizes: &[u64]) -> Self {
         Self {
             runs: sizes
@@ -64,24 +114,31 @@ impl LevelShape {
                 .enumerate()
                 .map(|(index, &bytes)| RunShape {
                     index,
-                    bytes,
-                    min_key: None,
-                    max_key: None,
+                    files: vec![FileShape {
+                        index: 0,
+                        bytes,
+                        min_key: None,
+                        max_key: None,
+                    }],
                 })
                 .collect(),
         }
     }
 
     pub fn bytes(&self) -> u64 {
-        self.runs.iter().map(|run| run.bytes).sum()
+        self.runs.iter().map(RunShape::bytes).sum()
     }
 
     pub fn run_count(&self) -> usize {
         self.runs.len()
     }
 
+    pub fn file_count(&self) -> usize {
+        self.runs.iter().map(RunShape::file_count).sum()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.runs.is_empty()
+        self.runs.iter().all(RunShape::is_empty)
     }
 }
 
@@ -139,12 +196,20 @@ mod tests {
         s.as_bytes().to_vec()
     }
 
-    fn run(index: usize, bytes: u64, min: &str, max: &str) -> RunShape {
-        RunShape {
+    fn file(index: usize, bytes: u64, min: &str, max: &str) -> FileShape {
+        FileShape {
             index,
             bytes,
             min_key: Some(k(min)),
             max_key: Some(k(max)),
+        }
+    }
+
+    /// A run of one file spanning `min..max`.
+    fn run(index: usize, bytes: u64, min: &str, max: &str) -> RunShape {
+        RunShape {
+            index,
+            files: vec![file(0, bytes, min, max)],
         }
     }
 
@@ -168,22 +233,48 @@ mod tests {
     fn an_empty_run_overlaps_nothing() {
         let empty = RunShape {
             index: 0,
-            bytes: 0,
-            min_key: None,
-            max_key: None,
+            files: Vec::new(),
         };
         assert!(!empty.overlaps(&run(1, 100, "a", "z")));
         assert!(!run(1, 100, "a", "z").overlaps(&empty));
         assert!(!empty.overlaps_range(&k("a"), &k("z")));
     }
 
+    /// A run's range spans its files: first file's min to last file's max.
     #[test]
-    fn range_overlap_matches_run_overlap() {
-        let subject = run(0, 100, "d", "h");
-        assert!(subject.overlaps_range(&k("a"), &k("e")));
-        assert!(subject.overlaps_range(&k("h"), &k("z")));
-        assert!(!subject.overlaps_range(&k("a"), &k("c")));
-        assert!(!subject.overlaps_range(&k("i"), &k("z")));
+    fn a_multi_file_run_reports_its_full_span() {
+        let subject = RunShape {
+            index: 0,
+            files: vec![
+                file(0, 10, "a", "c"),
+                file(1, 10, "d", "m"),
+                file(2, 10, "n", "z"),
+            ],
+        };
+
+        assert_eq!(subject.min_key(), Some(&k("a")));
+        assert_eq!(subject.max_key(), Some(&k("z")));
+        assert_eq!(subject.bytes(), 30);
+        assert_eq!(subject.file_count(), 3);
+    }
+
+    /// The point of tracking files: a partial compaction consumes only the
+    /// files a key range actually touches.
+    #[test]
+    fn only_the_files_intersecting_a_range_are_selected() {
+        let subject = RunShape {
+            index: 0,
+            files: vec![
+                file(0, 10, "a", "c"),
+                file(1, 10, "d", "m"),
+                file(2, 10, "n", "z"),
+            ],
+        };
+
+        assert_eq!(subject.files_overlapping(&k("e"), &k("f")), vec![1]);
+        assert_eq!(subject.files_overlapping(&k("c"), &k("e")), vec![0, 1]);
+        assert_eq!(subject.files_overlapping(&k("a"), &k("z")), vec![0, 1, 2]);
+        assert!(subject.files_overlapping(&k("A"), &k("B")).is_empty());
     }
 
     #[test]

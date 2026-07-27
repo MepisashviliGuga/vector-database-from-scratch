@@ -5,21 +5,32 @@
 //! Every level below level 0 holds exactly **one run**, so a lookup probes at
 //! most one run per level. Keeping that invariant is what costs: data arriving
 //! at level `i` must be merged into the run already there, rewriting the
-//! overlapping part of it. A record is rewritten roughly `T` times per level on
-//! its way to the bottom.
+//! overlapping part of it.
 //!
 //! ```text
 //!   L0 │ run  run  run          overlapping, straight from flushes
-//!   L1 │ ───────one run───────  merged eagerly
-//!   L2 │ ───────one run───────
+//!   L1 │ ──file──file──file──   one run, several disjoint files
+//!   L2 │ ─file─file─file─file─
 //! ```
 //!
-//! Level 0 is the standard exception: its runs come directly from memtable
-//! flushes, so their key ranges overlap arbitrarily and cannot form one sorted
-//! run. All of them are therefore compacted together — merging a subset would
-//! leave the rest overlapping the output and break level 1's invariant.
+//! # Full versus partial
+//!
+//! Under [`Granularity::Full`] the whole source level is merged with everything
+//! it overlaps below. Under [`Granularity::Partial`] one file's worth of key
+//! range moves at a time, together with just the files it overlaps.
+//!
+//! Write *amplification* is the same either way — both rewrite about `T+1` bytes
+//! per byte moved down a level. What differs is everything else: a partial
+//! compaction holds far less data hostage while it runs, so it does not spike
+//! space usage or stall the levels above. Paper 01 identifies exactly this as
+//! why industry adopted the vertical scheme despite its worse asymptotic
+//! read-write trade-off, and why the horizontal scheme — which is *defined* on
+//! full compaction — pays a space cost.
+//!
+//! Level 0 is always merged whole: its runs come straight from memtable flushes,
+//! so their key ranges overlap arbitrarily and cannot be sliced by key.
 
-use super::{CompactionJob, MergePolicy};
+use super::{all_files, CompactionJob, Granularity, MergePolicy, RunFiles};
 use crate::storage::shape::{is_deepest_level, TreeShape};
 use crate::storage::Key;
 
@@ -32,26 +43,45 @@ impl MergePolicy for Leveling {
         "leveling"
     }
 
-    fn plan(&self, tree: &TreeShape, source_level: usize) -> Option<CompactionJob> {
+    fn plan(
+        &self,
+        tree: &TreeShape,
+        source_level: usize,
+        granularity: Granularity,
+    ) -> Option<CompactionJob> {
         let source = tree.level(source_level)?;
         if source.is_empty() {
             return None;
         }
-
-        // All of the source level. Below level 0 there is normally only one run;
-        // at level 0 the runs overlap each other, so they must go together.
-        let source_runs: Vec<usize> = source.runs.iter().map(|run| run.index).collect();
         let target_level = source_level + 1;
-        let target_runs = overlapping_target_runs(tree, source_level, &source_runs, target_level);
+
+        // Level 0's runs overlap each other, so a key-range slice of one would
+        // still overlap the others. It always goes whole.
+        let sliceable = granularity == Granularity::Partial
+            && source_level > 0
+            && source.run_count() == 1;
+
+        let sources = if sliceable {
+            vec![pick_slice(tree, source_level)?]
+        } else {
+            all_files(tree, source_level)
+        };
+
+        // No known key range means nothing can be shown to overlap, so the merge
+        // proceeds with no target files rather than being abandoned.
+        let targets = match merged_span(tree, source_level, &sources) {
+            Some(span) => overlapping_target_files(tree, target_level, &span),
+            None => Vec::new(),
+        };
 
         Some(CompactionJob {
             source_level,
-            source_runs,
+            sources,
             target_level,
-            target_runs,
-            // Safe on the deepest-level check alone: every target run
+            targets,
+            // Safe on the deepest-level check alone: every target file
             // overlapping the merged range is consumed above, so whatever
-            // remains at the target cannot hold these keys.
+            // remains at the target is disjoint from these keys.
             drop_tombstones: is_deepest_level(tree, target_level),
         })
     }
@@ -61,59 +91,88 @@ impl MergePolicy for Leveling {
     }
 }
 
-/// Runs at `target_level` whose key range intersects the chosen sources.
+/// Choose one file to move down.
 ///
-/// These must be rewritten as part of the merge: leaving an overlapping run
-/// behind would put two runs holding the same key in one level, with no way for
-/// the read path to know which is newer.
-fn overlapping_target_runs(
-    tree: &TreeShape,
-    source_level: usize,
-    source_runs: &[usize],
-    target_level: usize,
-) -> Vec<usize> {
-    let (Some(source), Some(target)) = (tree.level(source_level), tree.level(target_level)) else {
-        return Vec::new();
-    };
+/// Takes the first file of the level's single run. Since that file is consumed
+/// by the compaction, successive calls sweep the level from low keys to high.
+///
+/// **Engineering choice, not from the paper.** LevelDB rotates a per-level
+/// pointer so successive compactions spread across the key space instead of
+/// marching through it, which distributes work more evenly under skew. Sweeping
+/// is simpler and gives the same amortised cost; if the Phase 3 skew workloads
+/// show it mattering, the rotating pointer goes in and gets labelled.
+fn pick_slice(tree: &TreeShape, source_level: usize) -> Option<RunFiles> {
+    let run = tree.level(source_level)?.runs.first()?;
+    let file = run.files.first()?;
+    Some(RunFiles {
+        run: run.index,
+        files: vec![file.index],
+    })
+}
 
-    let selected = source
-        .runs
-        .iter()
-        .filter(|run| source_runs.contains(&run.index));
-
-    // Combined span of everything being merged down.
+/// Combined key range of the selected source files.
+fn merged_span(tree: &TreeShape, level: usize, sources: &[RunFiles]) -> Option<(Key, Key)> {
+    let shape = tree.level(level)?;
     let mut span: Option<(Key, Key)> = None;
-    for run in selected {
-        if let (Some(min), Some(max)) = (&run.min_key, &run.max_key) {
-            span = Some(match span {
-                None => (min.clone(), max.clone()),
-                Some((lo, hi)) => (lo.min(min.clone()), hi.max(max.clone())),
-            });
+
+    for selection in sources {
+        let Some(run) = shape.runs.iter().find(|run| run.index == selection.run) else {
+            continue;
+        };
+        for file_index in &selection.files {
+            let Some(file) = run.files.iter().find(|file| file.index == *file_index) else {
+                continue;
+            };
+            if let (Some(min), Some(max)) = (&file.min_key, &file.max_key) {
+                span = Some(match span {
+                    None => (min.clone(), max.clone()),
+                    Some((lo, hi)) => (lo.min(min.clone()), hi.max(max.clone())),
+                });
+            }
         }
     }
-    let Some((min, max)) = span else {
+    span
+}
+
+/// Files at `target_level` intersecting `span`.
+///
+/// These must be rewritten as part of the merge: leaving an overlapping file
+/// behind would put two versions of a key in one level with no way for the read
+/// path to know which is newer.
+fn overlapping_target_files(
+    tree: &TreeShape,
+    target_level: usize,
+    span: &(Key, Key),
+) -> Vec<RunFiles> {
+    let Some(target) = tree.level(target_level) else {
         return Vec::new();
     };
+    let (min, max) = span;
 
     target
         .runs
         .iter()
-        .filter(|run| run.overlaps_range(&min, &max))
-        .map(|run| run.index)
+        .filter_map(|run| {
+            let files = run.files_overlapping(min, max);
+            (!files.is_empty()).then_some(RunFiles {
+                run: run.index,
+                files,
+            })
+        })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::shape::{LevelShape, RunShape};
+    use crate::storage::shape::{FileShape, LevelShape, RunShape};
 
     fn k(s: &str) -> Key {
         s.as_bytes().to_vec()
     }
 
-    fn run(index: usize, bytes: u64, min: &str, max: &str) -> RunShape {
-        RunShape {
+    fn file(index: usize, bytes: u64, min: &str, max: &str) -> FileShape {
+        FileShape {
             index,
             bytes,
             min_key: Some(k(min)),
@@ -121,44 +180,147 @@ mod tests {
         }
     }
 
+    /// A run of one file.
+    fn run(index: usize, bytes: u64, min: &str, max: &str) -> RunShape {
+        RunShape {
+            index,
+            files: vec![file(0, bytes, min, max)],
+        }
+    }
+
+    /// A run split across the given `(min, max)` file ranges.
+    fn multi_file_run(index: usize, ranges: &[(&str, &str)]) -> RunShape {
+        RunShape {
+            index,
+            files: ranges
+                .iter()
+                .enumerate()
+                .map(|(i, (min, max))| file(i, 100, min, max))
+                .collect(),
+        }
+    }
+
     #[test]
-    fn all_source_runs_are_merged_together() {
+    fn a_full_compaction_takes_every_source_run() {
         let tree = TreeShape {
             levels: vec![LevelShape::from_sizes(&[10, 10, 10, 10])],
         };
-        let job = Leveling.plan(&tree, 0).expect("job");
+        let job = Leveling.plan(&tree, 0, Granularity::Full).expect("job");
         assert_eq!(
-            job.source_runs,
-            vec![0, 1, 2, 3],
+            job.sources.len(),
+            4,
             "level 0 runs overlap arbitrarily, so they must all go together"
         );
         assert_eq!(job.target_level, 1);
     }
 
-    /// Only the overlapping slice of the level below is rewritten.
+    /// The point of partial compaction: one file's worth of key range moves,
+    /// with only the files it overlaps below.
     #[test]
-    fn only_overlapping_target_runs_are_included() {
+    fn a_partial_compaction_takes_one_file_and_its_overlap() {
         let tree = TreeShape {
             levels: vec![
+                LevelShape::default(),
                 LevelShape {
-                    runs: vec![run(0, 1000, "d", "f")],
+                    runs: vec![multi_file_run(0, &[("a", "c"), ("d", "f"), ("g", "i")])],
                 },
                 LevelShape {
-                    runs: vec![
-                        run(0, 100, "a", "c"), // before the source range
-                        run(1, 100, "e", "g"), // overlaps
-                        run(2, 100, "x", "z"), // after
-                    ],
+                    runs: vec![multi_file_run(
+                        0,
+                        &[("a", "b"), ("c", "e"), ("f", "h"), ("x", "z")],
+                    )],
                 },
             ],
         };
 
-        let job = Leveling.plan(&tree, 0).expect("job");
+        let job = Leveling.plan(&tree, 1, Granularity::Partial).expect("job");
+
+        assert_eq!(job.sources.len(), 1);
         assert_eq!(
-            job.target_runs,
-            vec![1],
-            "only the run intersecting d..f should be rewritten"
+            job.sources[0].files,
+            vec![0],
+            "only the first file of the source run should move"
         );
+        // Source file spans a..c; target files a..b and c..e intersect it.
+        assert_eq!(job.targets.len(), 1);
+        assert_eq!(job.targets[0].files, vec![0, 1]);
+        assert_eq!(
+            job.input_file_count(),
+            3,
+            "one source file plus two overlapping target files"
+        );
+    }
+
+    /// The whole reason partial compaction exists: it touches dramatically less.
+    #[test]
+    fn partial_compaction_rewrites_far_less_than_full() {
+        let wide_source = multi_file_run(
+            0,
+            &[("a", "c"), ("d", "f"), ("g", "i"), ("j", "l"), ("m", "o")],
+        );
+        let wide_target = multi_file_run(
+            0,
+            &[("a", "b"), ("c", "e"), ("f", "h"), ("i", "k"), ("l", "o")],
+        );
+        let tree = TreeShape {
+            levels: vec![
+                LevelShape::default(),
+                LevelShape {
+                    runs: vec![wide_source],
+                },
+                LevelShape {
+                    runs: vec![wide_target],
+                },
+            ],
+        };
+
+        let full = Leveling.plan(&tree, 1, Granularity::Full).expect("job");
+        let partial = Leveling.plan(&tree, 1, Granularity::Partial).expect("job");
+
+        assert_eq!(full.input_file_count(), 10, "everything, both levels");
+        assert!(
+            partial.input_file_count() < full.input_file_count() / 2,
+            "partial touched {} files against full's {}",
+            partial.input_file_count(),
+            full.input_file_count()
+        );
+    }
+
+    /// Level 0's runs overlap each other, so slicing one by key range would
+    /// leave the others overlapping the output.
+    #[test]
+    fn level_zero_is_never_sliced() {
+        let tree = TreeShape {
+            levels: vec![
+                LevelShape {
+                    runs: vec![run(0, 10, "a", "z"), run(1, 10, "a", "z")],
+                },
+                LevelShape::default(),
+            ],
+        };
+
+        let job = Leveling.plan(&tree, 0, Granularity::Partial).expect("job");
+        assert_eq!(
+            job.sources.len(),
+            2,
+            "a partial request at level 0 must still take both overlapping runs"
+        );
+    }
+
+    /// A level holding several runs cannot be sliced either — the same argument
+    /// as level 0. It can happen transiently after a policy switch.
+    #[test]
+    fn a_multi_run_level_is_never_sliced() {
+        let tree = TreeShape {
+            levels: vec![
+                LevelShape::default(),
+                LevelShape {
+                    runs: vec![run(0, 10, "a", "m"), run(1, 10, "d", "z")],
+                },
+            ],
+        };
+        let job = Leveling.plan(&tree, 1, Granularity::Partial).expect("job");
+        assert_eq!(job.sources.len(), 2);
     }
 
     #[test]
@@ -169,16 +331,20 @@ mod tests {
                     runs: vec![run(0, 1000, "m", "n")],
                 },
                 LevelShape {
-                    runs: vec![run(0, 100, "a", "c"), run(1, 100, "x", "z")],
+                    runs: vec![multi_file_run(0, &[("a", "c"), ("x", "z")])],
                 },
             ],
         };
-        assert!(Leveling.plan(&tree, 0).expect("job").target_runs.is_empty());
+        assert!(Leveling
+            .plan(&tree, 0, Granularity::Full)
+            .expect("job")
+            .targets
+            .is_empty());
     }
 
-    /// The span is the union across *all* source runs, not just the first.
+    /// The span is the union across *all* source files, not just the first.
     #[test]
-    fn the_merged_span_covers_every_source_run() {
+    fn the_merged_span_covers_every_source_file() {
         let tree = TreeShape {
             levels: vec![
                 LevelShape {
@@ -189,10 +355,10 @@ mod tests {
                 },
             ],
         };
-        let job = Leveling.plan(&tree, 0).expect("job");
+        let job = Leveling.plan(&tree, 0, Granularity::Full).expect("job");
         assert_eq!(
-            job.target_runs,
-            vec![0],
+            job.targets.len(),
+            1,
             "m..n lies inside the a..z span of the two source runs together"
         );
     }
@@ -202,7 +368,10 @@ mod tests {
         let shallow = TreeShape {
             levels: vec![LevelShape::from_sizes(&[10, 10])],
         };
-        assert!(Leveling.plan(&shallow, 0).expect("job").drop_tombstones);
+        assert!(Leveling
+            .plan(&shallow, 0, Granularity::Full)
+            .expect("job")
+            .drop_tombstones);
 
         let deep = TreeShape {
             levels: vec![
@@ -212,7 +381,10 @@ mod tests {
             ],
         };
         assert!(
-            !Leveling.plan(&deep, 0).expect("job").drop_tombstones,
+            !Leveling
+                .plan(&deep, 0, Granularity::Full)
+                .expect("job")
+                .drop_tombstones,
             "a tombstone dropped above level 2 would resurrect deleted keys"
         );
     }

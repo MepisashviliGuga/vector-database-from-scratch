@@ -27,7 +27,7 @@
 //! capacities permit *partial* compaction, merging a slice of a level rather
 //! than all of it.
 
-use super::{saturating_geometric, GrowthScheme, TreeShape};
+use super::{saturating_geometric, CompactionRequest, Granularity, GrowthScheme, TreeShape};
 
 /// Fixed level capacities; the tree gains levels as it grows.
 #[derive(Debug, Clone, Copy)]
@@ -98,13 +98,29 @@ impl GrowthScheme for Vertical {
     /// because a compaction changes the sizes of two levels and may push the
     /// target over its own capacity. Data only ever moves downward, so the
     /// cascade terminates.
-    fn next_compaction(&mut self, tree: &TreeShape) -> Option<usize> {
-        (0..tree.levels.len()).find(|&level| {
+    ///
+    /// Compaction is **partial** below level 0 — merging one file's worth of key
+    /// range rather than the whole level. That is the vertical scheme's
+    /// practical advantage and the reason industry adopted it. Level 0 is the
+    /// exception: its runs come straight from memtable flushes and overlap each
+    /// other arbitrarily, so they cannot be sliced by key range and are merged
+    /// whole.
+    fn next_compaction(&mut self, tree: &TreeShape) -> Option<CompactionRequest> {
+        let level = (0..tree.levels.len()).find(|&level| {
             let bytes = tree.level_bytes(level);
             // Paper 01's running example (Figure 2, T=2) triggers at exactly
             // capacity: level 1 holds 2 buffers, capacity 2 buffers, and merges.
             // So the comparison is `>=`, not `>`.
             bytes > 0 && bytes >= self.level_capacity_bytes(level)
+        })?;
+
+        Some(CompactionRequest {
+            level,
+            granularity: if level == 0 {
+                Granularity::Full
+            } else {
+                Granularity::Partial
+            },
         })
     }
 
@@ -120,6 +136,11 @@ mod tests {
     use crate::storage::shape::LevelShape;
 
     const MIB: u64 = 1024 * 1024;
+
+    /// The level a request names, discarding granularity.
+    fn level_of(request: Option<CompactionRequest>) -> Option<usize> {
+        request.map(|request| request.level)
+    }
 
     /// Build a tree whose levels hold the given byte counts.
     fn tree(level_bytes: &[u64]) -> TreeShape {
@@ -158,6 +179,26 @@ mod tests {
         assert!(Vertical::new(MIB, 10).next_compaction(&huge).is_some());
     }
 
+    /// The vertical scheme's practical advantage: below level 0 it moves a slice
+    /// rather than the whole level. Level 0 cannot be sliced, because its runs
+    /// overlap each other.
+    #[test]
+    fn compaction_is_partial_below_level_zero() {
+        let mut scheme = Vertical::new(1, 2);
+
+        let at_level_zero = scheme.next_compaction(&tree(&[9])).expect("a request");
+        assert_eq!(at_level_zero.level, 0);
+        assert_eq!(
+            at_level_zero.granularity,
+            Granularity::Full,
+            "level 0 runs overlap arbitrarily and cannot be sliced by key range"
+        );
+
+        let deeper = scheme.next_compaction(&tree(&[0, 99])).expect("a request");
+        assert_eq!(deeper.level, 1);
+        assert_eq!(deeper.granularity, Granularity::Partial);
+    }
+
     #[test]
     fn levels_are_added_as_data_grows() {
         let scheme = Vertical::new(MIB, 10);
@@ -194,23 +235,23 @@ mod tests {
 
         // n = 1: one buffer in level 0, under its capacity of 2.
         scheme.note_flush();
-        assert_eq!(scheme.next_compaction(&tree(&[1])), None);
+        assert_eq!(level_of(scheme.next_compaction(&tree(&[1]))), None);
 
         // n = 2: level 0 reaches capacity and merges into level 1.
         scheme.note_flush();
-        assert_eq!(scheme.next_compaction(&tree(&[2])), Some(0));
+        assert_eq!(level_of(scheme.next_compaction(&tree(&[2]))), Some(0));
 
         // n = 3: level 0 holds one buffer again, level 1 holds two.
         scheme.note_flush();
-        assert_eq!(scheme.next_compaction(&tree(&[1, 2])), None);
+        assert_eq!(level_of(scheme.next_compaction(&tree(&[1, 2]))), None);
 
         // n = 4: level 0 is full again and merges down...
         scheme.note_flush();
-        assert_eq!(scheme.next_compaction(&tree(&[2, 2])), Some(0));
+        assert_eq!(level_of(scheme.next_compaction(&tree(&[2, 2]))), Some(0));
         // ...which fills level 1 to its capacity of 4, so it cascades into a
         // newly created level 2.
-        assert_eq!(scheme.next_compaction(&tree(&[0, 4])), Some(1));
-        assert_eq!(scheme.next_compaction(&tree(&[0, 0, 4])), None);
+        assert_eq!(level_of(scheme.next_compaction(&tree(&[0, 4]))), Some(1));
+        assert_eq!(level_of(scheme.next_compaction(&tree(&[0, 0, 4]))), None);
     }
 
     #[test]
@@ -218,7 +259,7 @@ mod tests {
         let mut scheme = Vertical::new(1, 2);
         // Both level 0 (cap 2) and level 1 (cap 4) are over budget.
         assert_eq!(
-            scheme.next_compaction(&tree(&[3, 9])),
+            level_of(scheme.next_compaction(&tree(&[3, 9]))),
             Some(0),
             "data should move down one step at a time"
         );

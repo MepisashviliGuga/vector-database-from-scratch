@@ -52,7 +52,34 @@ pub use horizontal::HorizontalLeveling;
 pub use horizontal_tiering::HorizontalTiering;
 pub use vertical::Vertical;
 
-/// Decides when a level compacts into the next.
+/// How much of a level one compaction moves.
+///
+/// This belongs to the growth scheme rather than the merge policy, because paper
+/// 01 makes it a property of the scheme: the horizontal scheme is *defined* on
+/// full compaction, the vertical scheme permits partial, and Vertiorizon mixes
+/// the two — full in its horizontal part, partial between its bottom two levels.
+///
+/// The choice is not cosmetic. Full compaction is the mechanism behind the
+/// horizontal scheme's space cost: the inputs cannot be freed until a merge of
+/// the *entire* level completes, so a large level transiently needs room for
+/// both inputs and outputs, and the levels above it cannot drain meanwhile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Granularity {
+    /// Merge the whole level at once.
+    Full,
+    /// Merge a bounded slice: a few files, plus the files they overlap below.
+    Partial,
+}
+
+/// One compaction the growth scheme has scheduled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionRequest {
+    /// Compacts into `level + 1`.
+    pub level: usize,
+    pub granularity: Granularity,
+}
+
+/// Decides when a level compacts into the next, and at what granularity.
 pub trait GrowthScheme: Debug + Send {
     /// Short name for benchmark output and plot legends.
     fn name(&self) -> &'static str;
@@ -60,13 +87,13 @@ pub trait GrowthScheme: Debug + Send {
     /// Advance by one memtable flush landing in level 0.
     fn note_flush(&mut self);
 
-    /// The next level to compact into `level + 1`, or `None` once settled.
+    /// The next compaction to run, or `None` once settled.
     ///
     /// Called repeatedly after a flush until it returns `None`. Implementations
     /// update their internal schedule when they return `Some`, so **the caller
     /// must perform the compaction it is handed**; skipping one leaves the
     /// scheme believing work happened that did not.
-    fn next_compaction(&mut self, tree: &TreeShape) -> Option<usize>;
+    fn next_compaction(&mut self, tree: &TreeShape) -> Option<CompactionRequest>;
 
     /// Level count, if the scheme fixes one. `None` for schemes that add levels
     /// as data grows.

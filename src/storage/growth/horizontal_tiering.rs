@@ -55,7 +55,7 @@
 //! glue, not the paper's algorithm**, and it is the same need Vertiorizon's
 //! "dynamic resizing of the horizontal part" (§5.1) addresses.
 
-use super::{binomial, GrowthScheme, TreeShape};
+use super::{binomial, CompactionRequest, Granularity, GrowthScheme, TreeShape};
 
 /// Fixed level count with down-counting compaction triggers.
 #[derive(Debug, Clone)]
@@ -157,7 +157,7 @@ impl GrowthScheme for HorizontalTiering {
         self.scan_cursor = 0;
     }
 
-    fn next_compaction(&mut self, tree: &TreeShape) -> Option<usize> {
+    fn next_compaction(&mut self, tree: &TreeShape) -> Option<CompactionRequest> {
         let last_source = self.counters.len().saturating_sub(1);
 
         while self.scan_cursor < last_source {
@@ -175,7 +175,12 @@ impl GrowthScheme for HorizontalTiering {
                 for counter in self.counters[..=level].iter_mut() {
                     *counter = reset_to;
                 }
-                return Some(level);
+                return Some(CompactionRequest {
+                    level,
+                    // As with horizontal-leveling, the counters measure
+                    // whole-level merges.
+                    granularity: Granularity::Full,
+                });
             }
         }
         None
@@ -204,8 +209,9 @@ mod tests {
         let mut fired = Vec::new();
         for flush in 1..=flushes {
             scheme.note_flush();
-            while let Some(level) = scheme.next_compaction(&tree) {
-                if level == 0 {
+            while let Some(request) = scheme.next_compaction(&tree) {
+                assert_eq!(request.granularity, Granularity::Full);
+                if request.level == 0 {
                     fired.push(flush);
                 }
             }
@@ -252,7 +258,7 @@ mod tests {
         assert_eq!(scheme.counters(), &[1, 3], "two flushes consumed two counts");
 
         scheme.note_flush();
-        assert_eq!(scheme.next_compaction(&tree), Some(0));
+        assert_eq!(scheme.next_compaction(&tree).map(|r| r.level), Some(0));
         assert_eq!(
             scheme.counters(),
             &[2, 2],
@@ -262,7 +268,7 @@ mod tests {
         scheme.note_flush();
         assert_eq!(scheme.next_compaction(&tree), None);
         scheme.note_flush();
-        assert_eq!(scheme.next_compaction(&tree), Some(0));
+        assert_eq!(scheme.next_compaction(&tree).map(|r| r.level), Some(0));
         assert_eq!(scheme.counters(), &[1, 1]);
     }
 
@@ -304,8 +310,8 @@ mod tests {
         let mut leveling_fired = Vec::new();
         for flush in 1..=21 {
             leveling.note_flush();
-            while let Some(level) = leveling.next_compaction(&tree) {
-                if level == 0 {
+            while let Some(request) = leveling.next_compaction(&tree) {
+                if request.level == 0 {
                     leveling_fired.push(flush);
                 }
             }
@@ -345,8 +351,8 @@ mod tests {
         // Run well past the horizon the initial k was sized for.
         for _ in 0..200 {
             scheme.note_flush();
-            while let Some(level) = scheme.next_compaction(&tree) {
-                assert!(level < 2);
+            while let Some(request) = scheme.next_compaction(&tree) {
+                assert!(request.level < 2);
             }
         }
 
@@ -367,8 +373,12 @@ mod tests {
 
         for _ in 0..300 {
             scheme.note_flush();
-            while let Some(level) = scheme.next_compaction(&tree) {
-                assert!(level < 2, "level {level} is the deepest and cannot compact");
+            while let Some(request) = scheme.next_compaction(&tree) {
+                assert!(
+                    request.level < 2,
+                    "level {} is the deepest and cannot compact",
+                    request.level
+                );
             }
         }
     }
