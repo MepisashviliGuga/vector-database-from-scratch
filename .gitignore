@@ -1,0 +1,25 @@
+/target
+**/*.rs.bk
+
+# Source papers stay local. Papers/README.md carries the full citations and
+# links, so the repo stays small and redistribution of the PDFs is not this
+# project's call to make.
+Papers/*.pdf
+
+# Benchmark datasets are large and externally hosted; fetch scripts live in
+# benchmark/datasets/ instead.
+benchmark/datasets/*
+!benchmark/datasets/*.sh
+!benchmark/datasets/*.md
+
+# Engine data directories produced by tests and benchmark runs.
+/data
+*.sst
+*.wal
+
+# Raw benchmark output; committed results live in results/ as CSV + notebooks.
+/results/raw
+
+.ipynb_checkpoints/
+__pycache__/
+.venv/

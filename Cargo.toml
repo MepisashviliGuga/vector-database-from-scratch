@@ -1,0 +1,19 @@
+[package]
+name = "vectordb"
+version = "0.1.0"
+edition = "2021"
+description = "A vector database built from scratch: LSM-tree storage engine + quantization/graph ANN index"
+
+[lib]
+name = "vectordb"
+path = "src/lib.rs"
+
+[dependencies]
+
+[profile.release]
+# Keep symbols in release builds: every number this project reports comes from a
+# profiled release binary, and unwinding a flamegraph without symbols is misery.
+debug = true
+
+[profile.bench]
+debug = true
