@@ -7,12 +7,16 @@
 
 pub mod bloom;
 pub mod crc32;
+pub mod lsm;
 pub mod memtable;
+pub mod merge;
 pub mod sstable;
 pub mod wal;
 
 pub use bloom::BloomFilter;
+pub use lsm::{LsmConfig, LsmStats, LsmTree};
 pub use memtable::{MemTable, Value};
+pub use merge::MergeIterator;
 pub use sstable::{SSTable, SSTableMeta, SSTableWriter};
 pub use wal::{Replay, SyncPolicy, Wal};
 
