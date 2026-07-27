@@ -185,18 +185,27 @@ pub trait CompactionPolicy: Debug + Send + Sync {
     fn runs_per_level(&self) -> usize;
 }
 
-/// Whether a job writing into `target_level` may discard tombstones.
+/// Whether every level strictly below `target_level` is empty.
 ///
-/// Shared by both policies because getting it wrong is the same catastrophic bug
-/// either way: a tombstone dropped above a live entry silently resurrects a
-/// deleted key.
-pub(crate) fn is_bottom_level(tree: &TreeShape, target_level: usize) -> bool {
-    match tree.bottom_level() {
-        // Nothing below the target holds data, so no tombstone here can be
-        // shadowing anything.
-        Some(bottom) => target_level >= bottom,
-        None => true,
-    }
+/// A necessary condition for discarding tombstones, but **not a sufficient
+/// one** — the target level itself may still hold older runs. Each policy adds
+/// its own reasoning about those:
+///
+/// - Leveling consumes every target run overlapping the merged key range, and
+///   the runs it leaves behind are disjoint from that range by construction, so
+///   they cannot hold a key the output has a tombstone for. This condition alone
+///   is enough.
+/// - Tiering never consumes target runs at all, and the runs it leaves behind
+///   *do* overlap. It must additionally require the target level to be empty.
+///
+/// Getting this wrong is the same catastrophic bug either way: a tombstone
+/// dropped while a live entry survives below it silently resurrects a deleted
+/// key, with no error and no way to notice until the data is read.
+pub(crate) fn is_deepest_level(tree: &TreeShape, target_level: usize) -> bool {
+    tree.levels
+        .iter()
+        .enumerate()
+        .all(|(level, shape)| level <= target_level || shape.is_empty())
 }
 
 #[cfg(test)]
@@ -289,10 +298,8 @@ mod tests {
         );
     }
 
-    /// Tombstones may only be dropped at or below the deepest level holding
-    /// data. This is the guard against silently resurrecting deleted keys.
     #[test]
-    fn tombstones_are_droppable_only_at_the_bottom() {
+    fn the_deepest_level_is_the_one_with_nothing_under_it() {
         let tree = TreeShape {
             levels: vec![
                 LevelShape::from_sizes(&[10]),
@@ -301,17 +308,35 @@ mod tests {
             ],
         };
 
-        assert!(!is_bottom_level(&tree, 0));
-        assert!(!is_bottom_level(&tree, 1));
-        assert!(is_bottom_level(&tree, 2));
+        assert!(!is_deepest_level(&tree, 0));
+        assert!(!is_deepest_level(&tree, 1));
+        assert!(is_deepest_level(&tree, 2));
         assert!(
-            is_bottom_level(&tree, 3),
+            is_deepest_level(&tree, 3),
             "writing below the current bottom creates the new bottom"
         );
 
         assert!(
-            is_bottom_level(&TreeShape::default(), 0),
+            is_deepest_level(&TreeShape::default(), 0),
             "in an empty tree there is nothing for a tombstone to shadow"
         );
+    }
+
+    /// An empty trailing level must not make a shallower level look deepest.
+    #[test]
+    fn trailing_empty_levels_do_not_confuse_the_check() {
+        let tree = TreeShape {
+            levels: vec![
+                LevelShape::from_sizes(&[10]),
+                LevelShape::default(),
+                LevelShape::from_sizes(&[1000]),
+            ],
+        };
+        assert!(!is_deepest_level(&tree, 0));
+        assert!(
+            !is_deepest_level(&tree, 1),
+            "level 2 still holds data below level 1"
+        );
+        assert!(is_deepest_level(&tree, 2));
     }
 }

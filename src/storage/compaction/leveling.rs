@@ -32,7 +32,7 @@
 //! multiply write amplification by the level's size ratio and make the Phase 3
 //! comparison against tiering meaningless.
 
-use super::{is_bottom_level, CompactionJob, CompactionPolicy, GrowthScheme, TreeShape};
+use super::{is_deepest_level, CompactionJob, CompactionPolicy, GrowthScheme, TreeShape};
 
 /// One run per level below level 0.
 #[derive(Debug, Clone, Copy)]
@@ -89,7 +89,10 @@ impl CompactionPolicy for Leveling {
                     source_runs,
                     target_level: 1,
                     target_runs,
-                    drop_tombstones: is_bottom_level(tree, 1),
+                    // Safe on the deepest-level check alone: every target run
+                    // overlapping the merged range is consumed above, so what
+                    // remains at level 1 cannot hold these keys.
+                    drop_tombstones: is_deepest_level(tree, 1),
                 });
             }
         }
@@ -120,7 +123,7 @@ impl CompactionPolicy for Leveling {
                 source_runs,
                 target_level: level + 1,
                 target_runs,
-                drop_tombstones: is_bottom_level(tree, level + 1),
+                drop_tombstones: is_deepest_level(tree, level + 1),
             });
         }
 

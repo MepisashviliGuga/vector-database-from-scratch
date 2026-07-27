@@ -16,9 +16,9 @@ tested, and measured** — see [Reported numbers](#reported-numbers).
 
 | Phase | Component | State |
 |---|---|---|
-| 0 | Memtable, WAL, SSTable, bloom filter, merge iterator, LSM tree | done |
-| 0 | Growth schemes: vertical, horizontal | not started |
-| 0 | Compaction: leveling, tiering | not started |
+| 0 | Memtable, WAL, SSTable, bloom filter, merge iterator, manifest, LSM tree | done |
+| 0 | Growth schemes: vertical, horizontal | done |
+| 0 | Compaction: leveling, tiering | done |
 | 1 | Vertiorizon growth scheme (paper 01) | not started |
 | 2 | EcoTune compaction policy (paper 02) | not started |
 | 3 | Storage benchmarks across both axes | not started |
@@ -27,7 +27,7 @@ tested, and measured** — see [Reported numbers](#reported-numbers).
 | 6 | Integration, recall@k vs. QPS curves | not started |
 | 7 | Stretch: filtered search (paper 05), RusKey RL compaction (paper 06) | not started |
 
-87 unit tests, clippy clean at `-D warnings`.
+Phase 0 is complete. 152 unit tests, clippy clean at `-D warnings`.
 
 ## Architecture
 
@@ -78,7 +78,10 @@ first — and stop at the first entry found for the key, **including a tombstone
 | `src/storage/bloom.rs` | Bloom filter; k hashes from two via Kirsch-Mitzenmacher |
 | `src/storage/crc32.rs` | Table-driven CRC-32, matching zlib |
 | `src/storage/merge.rs` | K-way merge resolving key collisions by recency |
-| `src/storage/lsm.rs` | The tree: flush pipeline, multi-run read path, crash recovery |
+| `src/storage/manifest.rs` | Which runs are live; replaced by atomic rename, the commit point |
+| `src/storage/growth/` | Axis 1: `vertical`, `horizontal` |
+| `src/storage/compaction/` | Axis 2: `leveling`, `tiering` |
+| `src/storage/lsm.rs` | The tree: flush pipeline, multi-run read path, compaction, recovery |
 
 ## Running it
 
@@ -109,9 +112,16 @@ Two simplifications exist so far, both documented at the top of their modules:
 1. **WAL recovery** is a flat record stream, so a mid-file bit flip costs every
    record after it. LevelDB and RocksDB use fixed-size blocks with fragment
    types, which can resynchronise past corruption.
-2. **File tracking** is by filename (`L{level}-{sequence}.sst`) plus directory
-   listing, not a MANIFEST. RocksDB's version-edit log makes a multi-file
-   compaction atomic as a group; directory listing cannot express that.
+2. **Compaction is whole-run.** A job merges entire runs, where LevelDB and
+   RocksDB pick a bounded slice of the key range. Write *amplification* is the
+   same either way — both rewrite roughly `T+1` bytes per byte moved down a
+   level — but each individual compaction here is larger, so tail write latency
+   is worse than a production engine's. This matters for p99 in Phase 3.
+
+An earlier third simplification, tracking live files by directory listing rather
+than a manifest, turned out not to be safe and was removed rather than kept: it
+allowed stale reads after a crash mid-compaction. `src/storage/manifest.rs`
+explains the failure in full.
 
 ## Source papers
 

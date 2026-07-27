@@ -32,7 +32,7 @@
 //! overlaps existing runs at that level, and the read path resolves that by
 //! consulting runs newest-first.
 
-use super::{is_bottom_level, CompactionJob, CompactionPolicy, GrowthScheme, TreeShape};
+use super::{is_deepest_level, CompactionJob, CompactionPolicy, GrowthScheme, TreeShape};
 
 /// Up to `T` runs per level, merged all at once.
 #[derive(Debug, Clone, Copy)]
@@ -81,14 +81,24 @@ impl CompactionPolicy for Tiering {
             // that overlap the output, gaining nothing on read cost while paying
             // the full write cost.
             let source_runs: Vec<usize> = shape.runs.iter().map(|run| run.index).collect();
+            let target_level = level + 1;
+
+            // Tiering appends rather than merging, so runs already at the target
+            // survive this compaction *and* overlap the output. A tombstone
+            // dropped here would leave the older value in one of them reachable
+            // — the deleted key would come back. So the target level must also
+            // be empty, not merely the deepest.
+            let target_is_empty = tree
+                .level(target_level)
+                .is_none_or(|shape| shape.is_empty());
 
             return Some(CompactionJob {
                 source_level: level,
                 source_runs,
-                target_level: level + 1,
+                target_level,
                 // Appended, not merged: this is where the write saving lives.
                 target_runs: Vec::new(),
-                drop_tombstones: is_bottom_level(tree, level + 1),
+                drop_tombstones: is_deepest_level(tree, target_level) && target_is_empty,
             });
         }
         None
@@ -177,18 +187,19 @@ mod tests {
     }
 
     #[test]
-    fn tombstones_are_dropped_only_when_writing_to_the_bottom() {
-        let shallow = TreeShape {
+    fn tombstones_are_dropped_only_into_an_empty_bottom_level() {
+        let empty_target = TreeShape {
             levels: vec![LevelShape::from_sizes(&[KIB; 4])],
         };
         assert!(
             Tiering::new(4)
-                .pick(&shallow, &growth())
+                .pick(&empty_target, &growth())
                 .expect("a job")
-                .drop_tombstones
+                .drop_tombstones,
+            "nothing exists below, so nothing can be resurrected"
         );
 
-        let deep = TreeShape {
+        let deeper_data = TreeShape {
             levels: vec![
                 LevelShape::from_sizes(&[KIB; 4]),
                 LevelShape::from_sizes(&[KIB]),
@@ -197,9 +208,36 @@ mod tests {
         };
         assert!(
             !Tiering::new(4)
-                .pick(&deep, &growth())
+                .pick(&deeper_data, &growth())
                 .expect("a job")
                 .drop_tombstones
+        );
+    }
+
+    /// Regression test. Tiering appends without consuming the target level, so
+    /// runs already there survive the compaction and overlap the output. If the
+    /// tombstone check only asked "is this the deepest level?", a delete written
+    /// into level 1 would be discarded while the value it deletes still sat in
+    /// an older level-1 run — and the key would come back from the dead.
+    #[test]
+    fn tombstones_are_kept_when_the_target_level_still_holds_older_runs() {
+        let tree = TreeShape {
+            levels: vec![
+                LevelShape::from_sizes(&[KIB; 4]),
+                // Deepest level, but not empty: an older run lives here.
+                LevelShape::from_sizes(&[10 * KIB]),
+            ],
+        };
+
+        let job = Tiering::new(4).pick(&tree, &growth()).expect("a job");
+        assert_eq!(job.target_level, 1);
+        assert!(
+            job.target_runs.is_empty(),
+            "tiering leaves the target run in place, which is exactly the danger"
+        );
+        assert!(
+            !job.drop_tombstones,
+            "the surviving level-1 run can hold values these tombstones delete"
         );
     }
 

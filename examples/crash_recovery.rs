@@ -86,7 +86,8 @@ fn parent() -> std::io::Result<()> {
     println!("reopening the database...");
     let tree = LsmTree::open(&dir, config())?;
     let stats = tree.stats();
-    println!("  runs on disk    {}", stats.sstable_count);
+    println!("  runs on disk     {} in {} files", stats.run_count, stats.file_count);
+    println!("  runs per level   {:?}", stats.runs_per_level);
     println!("  memtable entries {} (replayed from the log)", stats.memtable_entries);
 
     let mut live = 0usize;
