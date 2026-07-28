@@ -7,6 +7,7 @@
 //! - `ann_index` (not yet started): quantization + graph-based approximate
 //!   nearest-neighbour search.
 
+pub mod ann;
 pub mod bench;
 pub mod storage;
 pub mod workload;
