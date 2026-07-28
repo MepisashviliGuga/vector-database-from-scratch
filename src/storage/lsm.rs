@@ -312,6 +312,22 @@ impl Run {
         Box::new(self.tables.iter().flat_map(SSTable::iter))
     }
 
+    /// Entries at or after `start`, in ascending key order.
+    ///
+    /// Skips the files that end before `start` entirely rather than opening and
+    /// discarding them, so a scan costs work proportional to what it returns.
+    fn source_from(&self, start: &[u8]) -> Source<'_> {
+        let first = self.tables.partition_point(|table| {
+            table.max_key().is_none_or(|max| max.as_slice() < start)
+        });
+        let start = start.to_vec();
+        Box::new(
+            self.tables[first..]
+                .iter()
+                .flat_map(move |table| table.range_from(&start)),
+        )
+    }
+
     fn reset_counters(&self) {
         for table in &self.tables {
             table.reset_counters();
@@ -497,6 +513,42 @@ impl LsmTree {
         // Safe here because this view spans *every* run: there is nothing older
         // left for a tombstone to shadow. The same reasoning does not transfer
         // to a partial compaction.
+        MergeIterator::dropping_tombstones(sources).map(|entry| {
+            entry.map(|(key, value)| match value {
+                Value::Put(bytes) => (key, bytes),
+                Value::Tombstone => unreachable!("tombstones were dropped by the merge"),
+            })
+        })
+    }
+
+    /// Live keys at or after `start`, in ascending order, deleted keys removed.
+    ///
+    /// Bound it with [`Iterator::take`] for a fixed-length scan. Every source is
+    /// *seeked* to `start` rather than filtered from the beginning, so the cost
+    /// is proportional to what comes back.
+    ///
+    /// This is the operation the compaction policies actually differ on. A point
+    /// lookup is answered from a bloom filter almost regardless of how many runs
+    /// exist — which is precisely why EcoTune leaves its top level uncompacted —
+    /// so a benchmark without range scans measures the one workload where every
+    /// policy looks the same.
+    pub fn range_from<'a>(
+        &'a self,
+        start: &[u8],
+    ) -> impl Iterator<Item = io::Result<(Key, UserValue)>> + 'a {
+        let mut sources: Vec<Source<'a>> = vec![Box::new(
+            self.memtable
+                .range::<[u8], _>((std::ops::Bound::Included(start), std::ops::Bound::Unbounded))
+                .map(|(key, value)| Ok((key.clone(), value.clone())))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        )];
+        for level in &self.levels {
+            for run in level {
+                sources.push(run.source_from(start));
+            }
+        }
+
         MergeIterator::dropping_tombstones(sources).map(|entry| {
             entry.map(|(key, value)| match value {
                 Value::Put(bytes) => (key, bytes),
@@ -1799,6 +1851,161 @@ mod tests {
             horizontal * 4 < total,
             "the horizontal part holds {horizontal} of {total} bytes, far more than \
              the intended 1 : T′ : T² split allows"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Range scans
+    // ---------------------------------------------------------------
+
+    /// A scan from the very beginning must return exactly what a full iteration
+    /// does — two code paths over the same data that must never disagree.
+    #[test]
+    fn a_scan_from_the_start_matches_full_iteration() {
+        let dir = TempDir::new("scan-all");
+        let mut tree = LsmTree::open(&dir.path, test_config()).expect("open");
+
+        for i in 0..800 {
+            let key = format!("key{:05}", (i * 7919) % 800);
+            tree.put(key.into_bytes(), vec![b'v'; 40]).expect("put");
+        }
+        tree.flush().expect("flush");
+
+        let iterated: Vec<_> = tree.iter().map(|e| e.expect("iter")).collect();
+        let scanned: Vec<_> = tree.range_from(b"").map(|e| e.expect("scan")).collect();
+        assert_eq!(scanned, iterated);
+    }
+
+    #[test]
+    fn a_scan_starts_at_the_requested_key_and_ascends() {
+        let dir = TempDir::new("scan-from");
+        let mut tree = LsmTree::open(&dir.path, test_config()).expect("open");
+
+        for i in 0..500 {
+            tree.put(format!("key{i:05}").into_bytes(), vec![b'v'; 40])
+                .expect("put");
+        }
+        tree.flush().expect("flush");
+
+        let scanned: Vec<Key> = tree
+            .range_from(b"key00250")
+            .take(10)
+            .map(|entry| entry.expect("scan").0)
+            .collect();
+
+        assert_eq!(scanned.len(), 10);
+        assert_eq!(scanned[0], b"key00250".to_vec());
+        assert_eq!(scanned[9], b"key00259".to_vec());
+        assert!(
+            scanned.windows(2).all(|pair| pair[0] < pair[1]),
+            "a scan must ascend: {scanned:?}"
+        );
+    }
+
+    /// A scan must honour tombstones and overwrites just as `get` does.
+    #[test]
+    fn a_scan_skips_deleted_keys_and_sees_the_newest_value() {
+        let dir = TempDir::new("scan-tombstones");
+        let mut tree = LsmTree::open(&dir.path, test_config()).expect("open");
+
+        for i in 0..300 {
+            tree.put(format!("key{i:05}").into_bytes(), v("old"))
+                .expect("put");
+        }
+        tree.flush().expect("flush");
+        for i in (0..300).step_by(3) {
+            tree.delete(format!("key{i:05}").into_bytes()).expect("delete");
+        }
+        for i in (1..300).step_by(3) {
+            tree.put(format!("key{i:05}").into_bytes(), v("new"))
+                .expect("put");
+        }
+
+        for (key, value) in tree.range_from(b"").map(|e| e.expect("scan")) {
+            let index: usize = String::from_utf8_lossy(&key)[3..].parse().expect("index");
+            assert_ne!(index % 3, 0, "key{index:05} was deleted but the scan returned it");
+            let expected = if index % 3 == 1 { v("new") } else { v("old") };
+            assert_eq!(value, expected, "wrong value for key{index:05}");
+        }
+    }
+
+    /// A scan past the end of the key space is empty, not an error.
+    #[test]
+    fn a_scan_beyond_the_last_key_is_empty() {
+        let dir = TempDir::new("scan-past-end");
+        let mut tree = LsmTree::open(&dir.path, test_config()).expect("open");
+        tree.put(k("alpha"), v("1")).expect("put");
+        tree.flush().expect("flush");
+
+        assert_eq!(tree.range_from(b"zzzz").count(), 0);
+    }
+
+    /// The point of seeking: a scan late in the key space must not read the
+    /// blocks before it. Without this, EcoTune's cost model measures nothing,
+    /// because every scan would cost a full file read regardless of run count.
+    #[test]
+    fn a_scan_does_not_read_blocks_before_its_start() {
+        let dir = TempDir::new("scan-seeks");
+        let mut tree = LsmTree::open(
+            &dir.path,
+            LsmConfig {
+                memtable_threshold_bytes: 4 * 1024 * 1024,
+                target_file_size_bytes: 64 * 1024,
+                block_target_bytes: 256,
+                ..no_compaction_config()
+            },
+        )
+        .expect("open");
+
+        for i in 0..4000 {
+            tree.put(format!("key{i:06}").into_bytes(), vec![b'v'; 50])
+                .expect("put");
+        }
+        tree.flush().expect("flush");
+
+        tree.reset_io_counters();
+        let full: usize = tree.iter().count();
+        let blocks_for_full_scan = tree.stats().blocks_read;
+
+        tree.reset_io_counters();
+        let tail: Vec<_> = tree.range_from(b"key003990").take(10).collect();
+        let blocks_for_short_scan = tree.stats().blocks_read;
+
+        assert_eq!(full, 4000);
+        assert_eq!(tail.len(), 10);
+        assert!(
+            blocks_for_short_scan * 10 < blocks_for_full_scan,
+            "a 10-entry scan read {blocks_for_short_scan} blocks against \
+             {blocks_for_full_scan} for the whole table; it is not seeking"
+        );
+    }
+
+    #[test]
+    fn a_scan_spans_levels_and_runs() {
+        let dir = TempDir::new("scan-levels");
+        let mut tree = LsmTree::open(&dir.path, test_config()).expect("open");
+
+        // Enough churn to spread data across several levels.
+        for i in 0..2000 {
+            let key = format!("key{:05}", (i * 7919) % 2000);
+            tree.put(key.into_bytes(), vec![b'v'; 50]).expect("put");
+        }
+        tree.flush().expect("flush");
+        assert!(tree.stats().runs_per_level.len() > 1, "expected several levels");
+
+        // Something still in the memtable, above everything on disk.
+        tree.put(k("key00042"), v("freshest")).expect("put");
+
+        let scanned: Vec<_> = tree
+            .range_from(b"key00040")
+            .take(5)
+            .map(|e| e.expect("scan"))
+            .collect();
+        assert_eq!(scanned[0].0, b"key00040".to_vec());
+        assert_eq!(
+            scanned[2],
+            (k("key00042"), v("freshest")),
+            "the memtable's value must win over the on-disk one"
         );
     }
 

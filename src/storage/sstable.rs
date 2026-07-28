@@ -524,6 +524,25 @@ impl SSTable {
             table: self,
             next_block: 0,
             buffered: Vec::new().into_iter(),
+            start: None,
+        }
+    }
+
+    /// Entries with keys at or after `start`, in ascending order.
+    ///
+    /// Seeks via the sparse index rather than scanning from the beginning, so a
+    /// scan late in the key space does not read the blocks before it. That
+    /// matters more than it looks: EcoTune's cost model turns entirely on the
+    /// I/O a long range scan costs, so a range scan that secretly read the whole
+    /// file would make every policy look identical.
+    pub fn range_from(&self, start: &[u8]) -> SSTableIter<'_> {
+        SSTableIter {
+            table: self,
+            // `None` means the key sorts before every block, so start at the
+            // first one rather than skipping the file.
+            next_block: self.block_for_key(start).unwrap_or(0),
+            buffered: Vec::new().into_iter(),
+            start: Some(start.to_vec()),
         }
     }
 
@@ -607,6 +626,10 @@ pub struct SSTableIter<'a> {
     table: &'a SSTable,
     next_block: usize,
     buffered: std::vec::IntoIter<(Key, Value)>,
+    /// Lower bound, for [`SSTable::range_from`]. Only the first block can hold
+    /// entries below it, but filtering every entry costs one comparison and
+    /// removes the special case.
+    start: Option<Key>,
 }
 
 impl Iterator for SSTableIter<'_> {
@@ -615,6 +638,11 @@ impl Iterator for SSTableIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some(entry) = self.buffered.next() {
+                if let Some(start) = &self.start {
+                    if entry.0 < *start {
+                        continue;
+                    }
+                }
                 return Some(Ok(entry));
             }
             if self.next_block >= self.table.index.len() {
