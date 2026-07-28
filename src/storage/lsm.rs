@@ -154,6 +154,21 @@ pub enum GrowthKind {
 }
 
 impl GrowthKind {
+    /// Short name for benchmark output.
+    ///
+    /// Matched here rather than delegating to a built scheme: constructing an
+    /// [`GrowthKind::EcoTune`] solves its dynamic program, which is far too much
+    /// work to label a CSV column.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Vertical { .. } => "vertical",
+            Self::HorizontalLeveling { .. } => "horizontal-leveling",
+            Self::HorizontalTiering { .. } => "horizontal-tiering",
+            Self::Vertiorizon { .. } => "vertiorizon",
+            Self::EcoTune { .. } => "ecotune",
+        }
+    }
+
     fn build(&self) -> Box<dyn GrowthScheme> {
         match *self {
             Self::Vertical {
@@ -199,6 +214,14 @@ pub enum MergeKind {
 }
 
 impl MergeKind {
+    /// Short name for benchmark output.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Leveling => "leveling",
+            Self::Tiering { .. } => "tiering",
+        }
+    }
+
     fn build(&self) -> Box<dyn MergePolicy> {
         match *self {
             Self::Leveling => Box::new(Leveling),
@@ -847,6 +870,16 @@ impl LsmTree {
                 run.reset_counters();
             }
         }
+    }
+
+    /// Name of the live growth scheme, for benchmark output.
+    pub fn growth_name(&self) -> &'static str {
+        self.growth.name()
+    }
+
+    /// Name of the live merge policy, for benchmark output.
+    pub fn merge_name(&self) -> &'static str {
+        self.merge.name()
     }
 
     pub fn level_count(&self) -> usize {
