@@ -18,8 +18,12 @@
 
 pub mod brute_force;
 pub mod fvecs;
+pub mod rabitq;
+pub mod rotation;
 
 pub use brute_force::{BruteForceIndex, Neighbor};
+pub use rabitq::{Code, RaBitQ};
+pub use rotation::Rotation;
 
 /// Squared Euclidean distance between two equal-length vectors.
 ///
