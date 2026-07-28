@@ -63,6 +63,12 @@ pub struct RunEntry {
     pub sequence: u64,
     /// Files, in ascending key order, holding disjoint slices of the range.
     pub files: Vec<String>,
+    /// How many unit runs (memtable flushes' worth) this run represents.
+    ///
+    /// Only EcoTune reads it, but it must be durable: its schedule specifies
+    /// merge widths in units, so a restart that reset every run to 1 would make
+    /// the scheduler merge the wrong sets.
+    pub units: usize,
 }
 
 /// The set of runs that make up the database.
@@ -115,6 +121,7 @@ impl Manifest {
                 Some("run") => {
                     let level = parse_field(fields.next(), "run level")?;
                     let sequence = parse_field(fields.next(), "run sequence")?;
+                    let units: usize = parse_field(fields.next(), "run unit count")?;
                     let files: Vec<String> = fields.map(str::to_string).collect();
                     if files.is_empty() {
                         return Err(malformed("a run entry names no files"));
@@ -123,6 +130,7 @@ impl Manifest {
                         level,
                         sequence,
                         files,
+                        units,
                     });
                 }
                 // Blank lines and anything unrecognised are skipped so a future
@@ -143,7 +151,7 @@ impl Manifest {
         body.push('\n');
         body.push_str(&format!("next-sequence {}\n", self.next_sequence));
         for run in &self.runs {
-            body.push_str(&format!("run {} {}", run.level, run.sequence));
+            body.push_str(&format!("run {} {} {}", run.level, run.sequence, run.units));
             for file in &run.files {
                 body.push(' ');
                 body.push_str(file);
@@ -231,6 +239,7 @@ mod tests {
             files: (0..parts)
                 .map(|part| table_filename(level, sequence, part))
                 .collect(),
+            units: 1,
         }
     }
 
@@ -357,6 +366,7 @@ mod tests {
                     table_filename(1, 9, 0),
                     table_filename(1, 12, 0),
                 ],
+                units: 3,
             }],
             next_sequence: 13,
         };

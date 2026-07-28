@@ -46,6 +46,14 @@ pub struct RunShape {
     /// Position within its level, newest first.
     pub index: usize,
     pub files: Vec<FileShape>,
+    /// How many *unit runs* this run represents.
+    ///
+    /// A unit run is one memtable flush's worth of data; a run produced by
+    /// merging others carries the sum of theirs. Only EcoTune uses this: its
+    /// schedule specifies merge widths in unit runs rather than in physical
+    /// runs, because a width-4 merge may absorb one previously-merged width-2
+    /// run plus two new ones. Every other scheme ignores it.
+    pub units: usize,
 }
 
 impl RunShape {
@@ -120,6 +128,7 @@ impl LevelShape {
                         min_key: None,
                         max_key: None,
                     }],
+                    units: 1,
                 })
                 .collect(),
         }
@@ -210,6 +219,7 @@ mod tests {
         RunShape {
             index,
             files: vec![file(0, bytes, min, max)],
+            units: 1,
         }
     }
 
@@ -234,6 +244,7 @@ mod tests {
         let empty = RunShape {
             index: 0,
             files: Vec::new(),
+            units: 1,
         };
         assert!(!empty.overlaps(&run(1, 100, "a", "z")));
         assert!(!run(1, 100, "a", "z").overlaps(&empty));
@@ -250,6 +261,7 @@ mod tests {
                 file(1, 10, "d", "m"),
                 file(2, 10, "n", "z"),
             ],
+            units: 1,
         };
 
         assert_eq!(subject.min_key(), Some(&k("a")));
@@ -269,6 +281,7 @@ mod tests {
                 file(1, 10, "d", "m"),
                 file(2, 10, "n", "z"),
             ],
+            units: 1,
         };
 
         assert_eq!(subject.files_overlapping(&k("e"), &k("f")), vec![1]);

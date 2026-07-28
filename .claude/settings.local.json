@@ -19,7 +19,8 @@
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 15; \"CLIPPY: $LASTEXITCODE\")",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example crash_recovery -q 2>&1 | Select-Object -Last 4)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example ecotune_schedule -q)",
-      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib --quiet 2>&1 | Select-String -Pattern \"test result|FAILED|panicked\"; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 10; \"CLIPPY: $LASTEXITCODE\")"
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib --quiet 2>&1 | Select-String -Pattern \"test result|FAILED|panicked\"; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 10; \"CLIPPY: $LASTEXITCODE\")",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 12; \"CLIPPY: $LASTEXITCODE\"; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example crash_recovery -q 2>&1 | Select-Object -Last 3)"
     ]
   }
 }

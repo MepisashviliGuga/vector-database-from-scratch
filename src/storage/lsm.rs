@@ -50,8 +50,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::compaction::{CompactionJob, Leveling, MergePolicy, RunFiles, Tiering};
+use super::compaction::EcoTuneConfig;
 use super::growth::{
-    GrowthScheme, HorizontalLeveling, HorizontalPolicy, HorizontalTiering, Vertical, Vertiorizon,
+    EcoTune, GrowthScheme, HorizontalLeveling, HorizontalPolicy, HorizontalTiering, Vertical,
+    Vertiorizon,
 };
 use super::manifest::{table_filename, Manifest, RunEntry};
 use super::merge::{memtable_source, MergeIterator, Source};
@@ -117,7 +119,7 @@ impl Default for LsmConfig {
 /// *stateful* — they carry compaction counters that advance as the database
 /// runs. Config stays a cloneable value describing what to build; [`LsmTree`]
 /// instantiates the live object and owns its state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GrowthKind {
     /// Fixed capacities, levels added as data grows. The industry baseline.
     Vertical { buffer_bytes: u64, size_ratio: u64 },
@@ -140,6 +142,14 @@ pub enum GrowthKind {
         /// data set does.
         initial_n: u64,
         policy: HorizontalPolicy,
+    },
+    /// Paper 02's EcoTune, mapped onto three levels. See
+    /// `growth::ecotune_scheme` for what in the mapping is ours rather than the
+    /// paper's — notably that `T_c` and `β` must be measured, not guessed.
+    EcoTune {
+        config: EcoTuneConfig,
+        /// Top level capacity `S`.
+        top_capacity_bytes: u64,
     },
 }
 
@@ -173,6 +183,10 @@ impl GrowthKind {
                 initial_n,
                 policy,
             )),
+            Self::EcoTune {
+                config,
+                top_capacity_bytes,
+            } => Box::new(EcoTune::new(config, top_capacity_bytes)),
         }
     }
 }
@@ -239,11 +253,19 @@ pub struct Run {
     sequence: u64,
     /// Ascending by key range, non-overlapping.
     tables: Vec<SSTable>,
+    /// Unit runs this represents: 1 for a flush, the sum of its inputs for a
+    /// merge. Only EcoTune reads it; see `shape::RunShape::units`.
+    units: usize,
 }
 
 impl Run {
     pub fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    /// Unit runs this run represents.
+    pub fn units(&self) -> usize {
+        self.units
     }
 
     pub fn file_count(&self) -> usize {
@@ -345,6 +367,7 @@ impl LsmTree {
             levels[entry.level].push(Run {
                 sequence: entry.sequence,
                 tables,
+                units: entry.units.max(1),
             });
         }
 
@@ -496,7 +519,8 @@ impl LsmTree {
         // Tombstones are kept: level 0 may sit above older runs holding the keys
         // they delete, and only compaction knows when that is no longer true.
         let entries = flushed.into_entries().map(Ok);
-        let run = write_run(&self.dir, &self.config, 0, sequence, entries)?;
+        // A flush is exactly one unit run, by definition.
+        let run = write_run(&self.dir, &self.config, 0, sequence, 1, entries)?;
 
         if let Some(run) = run {
             self.sstable_bytes_written += run.bytes();
@@ -569,6 +593,20 @@ impl LsmTree {
             prune_empty_runs(level);
         }
 
+        // The output carries every input's units, which is what makes EcoTune's
+        // width arithmetic work across successive merges.
+        let merged_units: usize = job
+            .sources
+            .iter()
+            .flat_map(|level_files| {
+                let level = self.levels.get(level_files.level);
+                level_files.runs.iter().filter_map(move |selection| {
+                    level.and_then(|runs| runs.get(selection.run)).map(Run::units)
+                })
+            })
+            .sum::<usize>()
+            .max(1);
+
         let sequence = self.take_sequence();
         let new_run = {
             // Newest first: sources sit at a shallower level, so they hold newer
@@ -587,7 +625,14 @@ impl LsmTree {
                 Box::new(MergeIterator::new(sources))
             };
 
-            write_run(&self.dir, &self.config, job.target_level, sequence, merged)?
+            write_run(
+                &self.dir,
+                &self.config,
+                job.target_level,
+                sequence,
+                merged_units,
+                merged,
+            )?
         };
 
         while self.levels.len() <= job.target_level {
@@ -649,6 +694,7 @@ impl LsmTree {
                                     max_key: table.max_key().cloned(),
                                 })
                                 .collect(),
+                            units: run.units,
                         })
                         .collect(),
                 })
@@ -675,6 +721,7 @@ impl LsmTree {
                                 .into_owned()
                         })
                         .collect(),
+                    units: run.units,
                 });
             }
         }
@@ -839,6 +886,7 @@ fn coalesce_disjoint_runs(level: &mut Vec<Run>) {
     }
 
     let newest_sequence = level.iter().map(Run::sequence).max().unwrap_or(0);
+    let total_units: usize = level.iter().map(Run::units).sum();
     let mut tables: Vec<SSTable> = level
         .drain(..)
         .flat_map(|run| run.tables.into_iter())
@@ -848,6 +896,7 @@ fn coalesce_disjoint_runs(level: &mut Vec<Run>) {
     level.push(Run {
         sequence: newest_sequence,
         tables,
+        units: total_units.max(1),
     });
 }
 
@@ -864,6 +913,7 @@ fn write_run(
     config: &LsmConfig,
     level: usize,
     sequence: u64,
+    units: usize,
     entries: impl Iterator<Item = io::Result<(Key, Value)>>,
 ) -> io::Result<Option<Run>> {
     let mut tables: Vec<SSTable> = Vec::new();
@@ -901,7 +951,11 @@ fn write_run(
     if tables.is_empty() {
         return Ok(None);
     }
-    Ok(Some(Run { sequence, tables }))
+    Ok(Some(Run {
+        sequence,
+        tables,
+        units,
+    }))
 }
 
 #[cfg(test)]
@@ -962,6 +1016,24 @@ mod tests {
     fn tiering_config() -> LsmConfig {
         LsmConfig {
             merge: MergeKind::Tiering { runs_per_level: 4 },
+            ..test_config()
+        }
+    }
+
+    /// EcoTune mapped onto top/main/last. Paired with tiering, because the main
+    /// level holds several runs and merges append rather than rewriting.
+    fn ecotune_config() -> LsmConfig {
+        LsmConfig {
+            growth: GrowthKind::EcoTune {
+                config: EcoTuneConfig {
+                    runs_per_round: 8,
+                    last_level_ratio: 3,
+                    long_range_ratio: 0.4,
+                    ..EcoTuneConfig::default()
+                },
+                top_capacity_bytes: 4096,
+            },
+            merge: MergeKind::Tiering { runs_per_level: 8 },
             ..test_config()
         }
     }
@@ -1149,6 +1221,7 @@ mod tests {
                 },
             ),
             ("vertiorizon", vertiorizon_config()),
+            ("ecotune", ecotune_config()),
             (
                 "vertiorizon-tiering",
                 LsmConfig {
@@ -1727,6 +1800,35 @@ mod tests {
             "the horizontal part holds {horizontal} of {total} bytes, far more than \
              the intended 1 : T′ : T² split allows"
         );
+    }
+
+    /// EcoTune's mapping must produce the three-level shape it claims, with the
+    /// last level collapsed to a single run by the round-ending compaction.
+    #[test]
+    fn ecotune_builds_a_three_level_tree() {
+        let dir = TempDir::new("ecotune-shape");
+        let mut tree = LsmTree::open(&dir.path, ecotune_config()).expect("open");
+
+        for i in 0..4000 {
+            let key = format!("key{:05}", (i * 7919) % 4000);
+            tree.put(key.into_bytes(), vec![b'v'; 60]).expect("put");
+        }
+        tree.flush().expect("flush");
+
+        let stats = tree.stats();
+        assert!(stats.compaction_count > 0, "compaction never ran");
+        assert!(
+            stats.runs_per_level.len() <= 3,
+            "EcoTune maps onto exactly three levels, got {:?}",
+            stats.runs_per_level
+        );
+        if stats.runs_per_level.len() == 3 {
+            assert!(
+                stats.runs_per_level[2] <= 1,
+                "the last level must hold at most one run, got {}",
+                stats.runs_per_level[2]
+            );
+        }
     }
 
     #[test]

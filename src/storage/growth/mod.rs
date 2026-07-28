@@ -44,11 +44,13 @@ use std::fmt::Debug;
 
 use super::shape::TreeShape;
 
+pub mod ecotune_scheme;
 pub mod horizontal;
 pub mod horizontal_tiering;
 pub mod vertical;
 pub mod vertiorizon;
 
+pub use ecotune_scheme::EcoTune;
 pub use horizontal::HorizontalLeveling;
 pub use horizontal_tiering::HorizontalTiering;
 pub use vertical::Vertical;
@@ -87,6 +89,14 @@ pub struct CompactionRequest {
     pub last_level: usize,
     pub target_level: usize,
     pub granularity: Granularity,
+    /// Merge only the newest runs whose combined unit count reaches this,
+    /// instead of the whole level.
+    ///
+    /// Only EcoTune sets it. Its schedule specifies widths in *unit runs*, and a
+    /// width-4 merge may absorb one previously-merged width-2 run plus two new
+    /// ones — so the count is in units, not physical runs. `None` means "take
+    /// everything", which is what every other scheme wants.
+    pub merge_units: Option<usize>,
 }
 
 impl CompactionRequest {
@@ -97,6 +107,7 @@ impl CompactionRequest {
             last_level: level,
             target_level: level + 1,
             granularity,
+            merge_units: None,
         }
     }
 

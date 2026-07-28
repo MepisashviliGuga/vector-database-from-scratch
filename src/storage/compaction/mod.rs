@@ -133,6 +133,9 @@ pub(crate) fn all_files(tree: &TreeShape, level: usize) -> Vec<RunFiles> {
 }
 
 /// Every file across a request's source levels, shallowest level first.
+///
+/// Honours [`CompactionRequest::merge_units`] when set, taking only the newest
+/// runs whose unit counts reach it.
 pub(crate) fn all_source_levels(
     tree: &TreeShape,
     request: CompactionRequest,
@@ -140,10 +143,58 @@ pub(crate) fn all_source_levels(
     request
         .source_levels()
         .filter_map(|level| {
-            let runs = all_files(tree, level);
+            let runs = match request.merge_units {
+                Some(units) => newest_runs_by_units(tree, level, units),
+                None => all_files(tree, level),
+            };
             (!runs.is_empty()).then_some(LevelFiles { level, runs })
         })
         .collect()
+}
+
+/// The newest runs in a level whose combined unit count reaches `units`.
+///
+/// Runs are stored newest first, and EcoTune's merges always consume a suffix of
+/// the most recent ones — a width-`w` merge at position `p` covers unit runs
+/// `(p−w, p]`, which are exactly the newest. Accumulating from the front until
+/// the width is met therefore selects the right set.
+///
+/// Stops short rather than overshooting: taking a run that carries more units
+/// than remain would merge data the schedule assigned to a later, separate final
+/// run.
+pub(crate) fn newest_runs_by_units(
+    tree: &TreeShape,
+    level: usize,
+    units: usize,
+) -> Vec<RunFiles> {
+    let Some(shape) = tree.level(level) else {
+        return Vec::new();
+    };
+
+    let mut selected = Vec::new();
+    let mut accumulated = 0usize;
+    for run in &shape.runs {
+        if run.is_empty() {
+            continue;
+        }
+        if accumulated + run.units > units {
+            break;
+        }
+        accumulated += run.units;
+        selected.push(RunFiles {
+            run: run.index,
+            files: run.files.iter().map(|file| file.index).collect(),
+        });
+        if accumulated >= units {
+            break;
+        }
+    }
+
+    // A single run wider than the whole request is not a merge worth doing.
+    if selected.len() < 2 {
+        return Vec::new();
+    }
+    selected
 }
 
 #[cfg(test)]
@@ -167,6 +218,7 @@ mod tests {
                 min_key: Some(min.as_bytes().to_vec()),
                 max_key: Some(max.as_bytes().to_vec()),
             }],
+            units: 1,
         }
     }
 

@@ -72,11 +72,19 @@ impl MergePolicy for Leveling {
             return None;
         }
 
+        // A request whose target is also a source is consuming that level
+        // outright, so there is nothing left there to merge *into*. Selecting
+        // targets anyway would name the same runs twice and the executor would
+        // try to take them twice.
+        let target_is_a_source = request.source_levels().any(|level| level == target_level);
+
         // No known key range means nothing can be shown to overlap, so the merge
         // proceeds with no target files rather than being abandoned.
         let targets = match merged_span(tree, &sources) {
-            Some(span) => overlapping_target_files(tree, target_level, &span),
-            None => Vec::new(),
+            Some(span) if !target_is_a_source => {
+                overlapping_target_files(tree, target_level, &span)
+            }
+            _ => Vec::new(),
         };
 
         Some(CompactionJob {
@@ -207,6 +215,7 @@ mod tests {
         RunShape {
             index,
             files: vec![file(0, bytes, min, max)],
+            units: 1,
         }
     }
 
@@ -219,6 +228,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, (min, max))| file(i, 100, min, max))
                 .collect(),
+            units: 1,
         }
     }
 
@@ -257,6 +267,7 @@ mod tests {
                     last_level: 2,
                     target_level: 3,
                     granularity: Granularity::Full,
+                    merge_units: None,
                 },
             )
             .expect("job");
@@ -294,6 +305,7 @@ mod tests {
                     last_level: 1,
                     target_level: 2,
                     granularity: Granularity::Partial,
+                    merge_units: None,
                 },
             )
             .expect("job");

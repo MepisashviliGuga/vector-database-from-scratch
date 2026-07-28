@@ -230,6 +230,7 @@ impl GrowthScheme for Vertiorizon {
                 // The horizontal scheme is defined on full compaction, and this
                 // is the merge that empties the part outright.
                 granularity: Granularity::Full,
+                merge_units: None,
             });
         }
 

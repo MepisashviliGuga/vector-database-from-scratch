@@ -69,9 +69,16 @@ impl MergePolicy for Tiering {
         // Runs already at the target survive this compaction *and* overlap the
         // output. A tombstone dropped here would leave the older value in one of
         // them reachable, so the target must be empty as well as deepest.
-        let target_is_empty = tree
-            .level(target_level)
-            .is_none_or(|shape| shape.is_empty());
+        //
+        // Unless the target is itself one of the source levels, in which case it
+        // is being consumed and nothing survives it. EcoTune's round-ending
+        // global compaction is exactly that: it names the last level as both a
+        // source and the target, so the whole tree collapses into one run.
+        let target_is_consumed = request.source_levels().any(|level| level == target_level);
+        let target_is_empty = target_is_consumed
+            || tree
+                .level(target_level)
+                .is_none_or(|shape| shape.is_empty());
 
         Some(CompactionJob {
             sources,
