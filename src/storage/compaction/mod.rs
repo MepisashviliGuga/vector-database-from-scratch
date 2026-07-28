@@ -24,9 +24,11 @@ use std::fmt::Debug;
 use super::growth::CompactionRequest;
 use super::shape::TreeShape;
 
+pub mod ecotune;
 pub mod leveling;
 pub mod tiering;
 
+pub use ecotune::{EcoTuneConfig, EcoTunePolicy};
 pub use leveling::Leveling;
 pub use tiering::Tiering;
 
