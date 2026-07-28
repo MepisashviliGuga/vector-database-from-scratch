@@ -8,3 +8,4 @@
 //!   nearest-neighbour search.
 
 pub mod storage;
+pub mod workload;
