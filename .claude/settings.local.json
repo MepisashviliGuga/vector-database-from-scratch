@@ -24,7 +24,10 @@
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib --quiet 2>&1 | Select-String -Pattern \"^error|test result|FAILED|panicked\" | Select-Object -First 15; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 10; \"CLIPPY: $LASTEXITCODE\")",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib --quiet 2>&1 | Select-String -Pattern \"^error|test result|FAILED\" | Select-Object -First 10; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 8; \"CLIPPY: $LASTEXITCODE\")",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 10; \"CLIPPY: $LASTEXITCODE\")",
-      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 8; \"CLIPPY: $LASTEXITCODE\"; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib --quiet 2>&1 | Select-String -Pattern \"test result|FAILED\")"
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 8; \"CLIPPY: $LASTEXITCODE\"; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib --quiet 2>&1 | Select-String -Pattern \"test result|FAILED\")",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe build --release --example storage_bench 2>&1 | Select-String -Pattern \"^error|^  -->\" | Select-Object -First 15; \"BUILD: $LASTEXITCODE\")",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example storage_bench -q)",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib --quiet 2>&1 | Select-String -Pattern \"test result|FAILED\"; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 8; \"CLIPPY: $LASTEXITCODE\")"
     ]
   }
 }

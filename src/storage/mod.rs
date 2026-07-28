@@ -19,7 +19,10 @@ pub mod wal;
 
 pub use bloom::BloomFilter;
 pub use compaction::{CompactionJob, Leveling, MergePolicy, Tiering};
-pub use growth::{GrowthScheme, HorizontalLeveling, HorizontalTiering, Vertical};
+pub use growth::{
+    EcoTune, GrowthScheme, HorizontalLeveling, HorizontalPolicy, HorizontalTiering, Vertical,
+    Vertiorizon,
+};
 pub use lsm::{GrowthKind, LsmConfig, LsmStats, LsmTree, MergeKind, Run};
 pub use shape::{LevelShape, RunShape, TreeShape};
 pub use manifest::Manifest;

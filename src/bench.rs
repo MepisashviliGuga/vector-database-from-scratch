@@ -100,6 +100,9 @@ pub struct BenchResult {
     pub distribution: String,
     pub value_bytes: usize,
     pub workload: String,
+    /// Whether every write was `fsync`ed. A throughput number is meaningless
+    /// without it, so it travels with the row rather than living in a comment.
+    pub sync_policy: String,
 
     pub load_ops: usize,
     pub load_seconds: f64,
@@ -135,7 +138,7 @@ pub struct BenchResult {
 
 impl BenchResult {
     pub fn csv_header() -> &'static str {
-        "growth,merge,distribution,value_bytes,workload,\
+        "growth,merge,distribution,value_bytes,workload,sync_policy,\
          load_ops,load_seconds,run_ops,run_seconds,throughput_ops_per_sec,\
          p50_micros,p99_micros,p999_micros,\
          write_amplification,load_write_amplification,\
@@ -152,12 +155,13 @@ impl BenchResult {
         }
 
         format!(
-            "{},{},{},{},{},{},{:.4},{},{:.4},{:.1},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{:.4},{},{:.4},{:.1},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.growth,
             self.merge,
             self.distribution,
             self.value_bytes,
             self.workload,
+            self.sync_policy,
             self.load_ops,
             self.load_seconds,
             self.run_ops,
@@ -195,6 +199,7 @@ pub fn run_benchmark(
 ) -> io::Result<BenchResult> {
     let growth = config.growth.name().to_string();
     let merge = config.merge.name().to_string();
+    let sync_policy = format!("{:?}", config.sync_policy);
     let mut tree = LsmTree::open(dir, config)?;
 
     // ---- Load phase: insert the key space once, sequentially. ----
@@ -268,6 +273,7 @@ pub fn run_benchmark(
         distribution: spec.distribution.name().to_string(),
         value_bytes: spec.value_bytes,
         workload: spec.label(),
+        sync_policy,
 
         load_ops: spec.key_count as usize,
         load_seconds,
