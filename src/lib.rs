@@ -9,5 +9,6 @@
 
 pub mod ann;
 pub mod bench;
+pub mod engine;
 pub mod storage;
 pub mod workload;

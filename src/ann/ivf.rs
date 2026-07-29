@@ -230,6 +230,53 @@ impl IvfIndex {
         results
     }
 
+    /// Train centroids on `data` but leave the lists empty.
+    ///
+    /// For callers whose ids are not a dense `0..n` range — [`Self::build`]
+    /// assigns ids by position, which silently mislabels everything if the
+    /// caller's ids are sparse. Train, then [`Self::insert`] each vector under
+    /// its real id.
+    pub fn train_only(data: &[f32], dimension: usize, config: IvfConfig) -> Self {
+        let mut index = Self::build(data, dimension, config);
+        for list in &mut index.lists {
+            list.ids.clear();
+            list.codes.clear();
+        }
+        index.vectors = 0;
+        index
+    }
+
+    /// Add one vector to an already-trained index.
+    ///
+    /// Centroids are **not** retrained: the vector is assigned to the nearest
+    /// existing one and encoded against it. This is how production IVF handles
+    /// growth, and it is why IVF suits a live database where a graph index does
+    /// not — insertion is `O(clusters · D)` with no global restructuring.
+    ///
+    /// The cost is drift. As inserts accumulate, centroids trained on the
+    /// original distribution fit the data less well, residuals grow, and both
+    /// recall and list balance degrade. A periodic rebuild is the remedy, and
+    /// [`Self::list_sizes`] is how you notice it is due.
+    ///
+    /// # Panics
+    ///
+    /// If `vector` is the wrong length.
+    pub fn insert(&mut self, id: u32, vector: &[f32]) {
+        assert_eq!(vector.len(), self.dimension, "vector has the wrong length");
+
+        let (cluster, _) = self.centroids.assign(vector);
+        let centroid = self
+            .centroids
+            .centroid(cluster)
+            .expect("assign returned a valid cluster");
+
+        self.lists[cluster].ids.push(id);
+        self.lists[cluster]
+            .codes
+            .push(self.quantizer.encode(vector, centroid));
+        self.vectors += 1;
+    }
+
     /// Sizes of the lists a query would probe, for reporting how much of the
     /// dataset a search actually examines.
     pub fn search_probe_sizes(&self, query: &[f32], nprobe: usize) -> Vec<usize> {
