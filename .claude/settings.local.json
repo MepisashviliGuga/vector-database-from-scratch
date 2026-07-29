@@ -38,7 +38,9 @@
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe build --release --example ann_groundtruth 2>&1 | Select-String -Pattern \"^error|^  -->\" | Select-Object -First 10; \"BUILD: $LASTEXITCODE\"; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 6; \"CLIPPY: $LASTEXITCODE\")",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 6; \"CLIPPY: $LASTEXITCODE\"; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib --quiet 2>&1 | Select-String \"test result\"; git status --short | Select-Object -First 12)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example rabitq_recall -q)",
-      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example rabitq_recall -q -- benchmark/datasets/sift/sift 100 1,4,5,7)"
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example rabitq_recall -q -- benchmark/datasets/sift/sift 100 1,4,5,7)",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example ivf_recall -q)",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example ivf_recall -q -- benchmark/datasets/sift/sift 100 5 1024)"
     ]
   }
 }
