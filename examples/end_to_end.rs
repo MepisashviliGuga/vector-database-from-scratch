@@ -97,12 +97,31 @@ fn main() -> std::io::Result<()> {
         .collect();
     println!("{:.1}s\n", truth_start.elapsed().as_secs_f64());
 
+    let nprobe = 32;
+
+    // Warm the page cache before timing anything. Re-ranking reads SSTable
+    // blocks, so the first configuration swept would otherwise be charged for
+    // faulting in a multi-hundred-megabyte store and report a *higher* cost
+    // than the strictly larger budgets that follow it.
+    print!("warming... ");
+    let warm_start = Instant::now();
+    for query in &query_rows {
+        store.search(
+            query,
+            10,
+            SearchParams {
+                nprobe,
+                rerank_candidates: 500,
+            },
+        )?;
+    }
+    println!("{:.1}s\n", warm_start.elapsed().as_secs_f64());
+
     println!(
         "  {:>10}  {:>10}  {:>10}",
         "candidates", "recall@10", "ms/query"
     );
 
-    let nprobe = 32;
     for rerank in [10usize, 20, 50, 100, 200, 500] {
         let params = SearchParams {
             nprobe,
