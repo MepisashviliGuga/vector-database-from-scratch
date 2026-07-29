@@ -139,6 +139,23 @@ impl RaBitQ {
         self.bits
     }
 
+    /// The random rotation `P`.
+    ///
+    /// Exposed for SymphonyQG §3.1.1, which rotates a *raw* query once and
+    /// reuses it across every centroid in a graph traversal, rather than
+    /// rotating a normalized query per centroid as [`Self::prepare_query`] does.
+    pub fn rotation(&self) -> &Rotation {
+        &self.rotation
+    }
+
+    /// `(2^B − 1)/2`, the offset between signed grid values and unsigned codes.
+    ///
+    /// Exposed for the same decomposition: a caller reconstructing the estimator
+    /// from its parts needs to subtract this offset itself.
+    pub fn offset(&self) -> f32 {
+        self.offset
+    }
+
     /// Bytes a single code occupies.
     ///
     /// One byte per dimension here, since the codes are not bit-packed. Paper 03

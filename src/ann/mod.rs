@@ -23,6 +23,7 @@ pub mod ivf;
 pub mod kmeans;
 pub mod rabitq;
 pub mod rotation;
+pub mod symphony;
 
 pub use brute_force::{BruteForceIndex, Neighbor};
 pub use graph::{GraphConfig, GraphIndex};
@@ -30,6 +31,7 @@ pub use ivf::{IvfConfig, IvfIndex};
 pub use kmeans::KMeans;
 pub use rabitq::{Code, RaBitQ};
 pub use rotation::Rotation;
+pub use symphony::{SymphonyConfig, SymphonyIndex};
 
 /// Squared Euclidean distance between two equal-length vectors.
 ///

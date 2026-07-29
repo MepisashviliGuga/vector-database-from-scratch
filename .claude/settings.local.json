@@ -41,7 +41,13 @@
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example rabitq_recall -q -- benchmark/datasets/sift/sift 100 1,4,5,7)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example ivf_recall -q)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example ivf_recall -q -- benchmark/datasets/sift/sift 100 5 1024)",
-      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib \"ann::ivf\" --quiet 2>&1 | Select-String -Pattern \"^error|^  -->|test result|FAILED|panicked\" | Select-Object -First 12; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 5; \"CLIPPY: $LASTEXITCODE\")"
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib \"ann::ivf\" --quiet 2>&1 | Select-String -Pattern \"^error|^  -->|test result|FAILED|panicked\" | Select-Object -First 12; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 5; \"CLIPPY: $LASTEXITCODE\")",
+      "Bash(C:/Users/Guga/.cargo/bin/cargo.exe test *)",
+      "Bash(cp \"C:/Users/Guga/AppData/Local/Temp/claude/C--Users-Guga-OneDrive---Kutaisi-International-University-Desktop-Vector-Database-Built-From-Scratch/3fe90b9a-9f6c-4538-9607-761c0a8b1d6e/scratchpad/bits_probe.rs\" examples/bits_probe.rs)",
+      "Bash(C:/Users/Guga/.cargo/bin/cargo.exe run *)",
+      "Bash(rm -f examples/bits_probe.rs)",
+      "Bash(sed -i 's/^use super::graph::{GraphConfig, GraphIndex};$/use super::graph::{GraphConfig, GraphIndex};/' src/ann/symphony.rs)",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib --quiet 2>&1 | Select-String -Pattern \"test result|FAILED\"; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error\" | Select-Object -First 4; \"CLIPPY: $LASTEXITCODE\")"
     ]
   }
 }
