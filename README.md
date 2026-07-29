@@ -22,14 +22,17 @@ are reported rather than hidden.
 | 1 | Horizontal-tiering (paper 01, Algorithm 2 — their contribution) | done |
 | 1 | **Vertiorizon** (paper 01 §5): two-part layout, `T′ = T/√2`, dynamic `n` | done |
 | 1 | Vertiorizon self-tuning (§5.2), skew adaptation (§5.3), dynamic Bloom layout | **not reproduced** — out of scope, see below |
-| 2 | EcoTune compaction policy (paper 02) | not started |
-| 3 | Storage benchmarks across both axes | not started |
-| 4 | Brute-force exact k-NN baseline | not started |
-| 5 | Extended RaBitQ quantizer (paper 03) + SymphonyQG graph (paper 04) | not started |
+| 2 | EcoTune cost model + DP scheduler (paper 02, Algorithm 1) | done |
+| 2 | EcoTune §4.3.3 pending-runs refinement | **not reproduced** — the paper omits its derivation |
+| 3 | Storage benchmarks, workload generator, range scans | done — [results](results/README.md) |
+| 4 | Brute-force exact k-NN baseline | done — validated against published SIFT ground truth |
+| 5 | Extended RaBitQ quantizer (paper 03) | done — [results](results/ann_recall.md) |
+| 5 | IVF clustering, then SymphonyQG graph (paper 04) | not started |
 | 6 | Integration, recall@k vs. QPS curves | not started |
 | 7 | Stretch: filtered search (paper 05), RusKey RL compaction (paper 06) | not started |
 
-Phases 0 and 1 are complete. 181 unit tests, clippy clean at `-D warnings`.
+Phases 0-4 are complete and Phase 5 is under way. 296 unit tests, clippy clean at
+`-D warnings`.
 
 The three growth schemes are pinned against paper 01's own running examples —
 Figure 2 for vertical and horizontal-leveling, Figure 5 for horizontal-tiering —
@@ -90,12 +93,29 @@ first — and stop at the first entry found for the key, **including a tombstone
 | `src/storage/compaction/` | Axis 2 — *how* to merge: `leveling`, `tiering` |
 | `src/storage/lsm.rs` | The tree: flush pipeline, multi-run read path, compaction, recovery |
 
+### ANN layer, as built
+
+| File | What it is |
+|---|---|
+| `src/ann/brute_force.rs` | Exact k-NN by full scan — the oracle every recall figure is measured against |
+| `src/ann/fvecs.rs` | Readers for the SIFT/GIST `.fvecs` and `.ivecs` formats |
+| `src/ann/rotation.rs` | Random orthogonal matrix; moves the randomness out of the data and into `P` |
+| `src/ann/rabitq.rs` | Extended RaBitQ: normalized-grid codebook, Algorithm 1 encoding, unbiased estimator |
+| `src/workload.rs` | Deterministic YCSB-style workload generator |
+| `src/bench.rs` | Measurement harness: amplification, throughput, p50/p99 |
+
 ## Running it
 
 ```bash
 cargo test                                        # unit tests
 cargo run --release --example bloom_stats         # what the bloom filter buys
 cargo run --release --example crash_recovery      # kill a process, verify durability
+cargo run --release --example storage_bench       # the Phase 3 sweep
+cargo run --release --example ecotune_schedule    # what EcoTune's DP decides
+
+# ANN. Fetch a dataset first: benchmark/datasets/fetch.sh siftsmall
+cargo run --release --example ann_groundtruth     # validate the oracle
+cargo run --release --example rabitq_recall       # recall vs bits per dimension
 ```
 
 `crash_recovery` spawns a child that writes 5,000 records with per-write `fsync`,
@@ -129,6 +149,11 @@ An earlier third simplification, tracking live files by directory listing rather
 than a manifest, turned out not to be safe and was removed rather than kept: it
 allowed stale reads after a crash mid-compaction. `src/storage/manifest.rs`
 explains the failure in full.
+
+**Not reproduced from paper 03 (extended RaBitQ):** the SIMD `FastScan` path and
+the two-stage most-significant-bit query. Accuracy and memory are therefore
+comparable to the paper; **query throughput is not**, and no timing claim is made
+for the quantizer.
 
 **Not reproduced from paper 01**, and labelled as such rather than approximated:
 
