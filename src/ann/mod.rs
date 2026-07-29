@@ -18,12 +18,14 @@
 
 pub mod brute_force;
 pub mod fvecs;
+pub mod graph;
 pub mod ivf;
 pub mod kmeans;
 pub mod rabitq;
 pub mod rotation;
 
 pub use brute_force::{BruteForceIndex, Neighbor};
+pub use graph::{GraphConfig, GraphIndex};
 pub use ivf::{IvfConfig, IvfIndex};
 pub use kmeans::KMeans;
 pub use rabitq::{Code, RaBitQ};
