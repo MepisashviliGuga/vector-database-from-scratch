@@ -214,18 +214,45 @@ Everything is single-threaded and scalar. No figure here is comparable to a
 published one; they are comparable **within a table**, which is what the tables
 are for.
 
-### One number I cannot yet account for
+### Brute force scales sublinearly, and I cannot explain why
 
-QPS should not be compared across the two tables, and one pair shows why.
-Brute force at 100k costs **15.1 ms/query**. Phase 5 measured brute force on the
-full SIFT1M at **62 ms/query** — 10× the data for 4.1× the time. Since brute
-force is exactly linear in the data, one of the two is off by ~2.4×, and I have
-not isolated which.
+QPS should not be compared across tables, and chasing one pair that looked wrong
+turned up something I have not been able to account for.
 
-Candidates I have not ruled out: the two figures come from different examples
-built at different times, and the 1M measurement predates the best-of-N timing
-change. It does not affect any conclusion drawn above — every comparison in this
-document is between rows measured in the same process against the same data —
-but it does mean the cross-table scaling claims should be read as within-table
-trends, not as a measured scaling law. Settling it needs brute force re-measured
-at both sizes under the current harness.
+Brute force is exactly linear in the data — every candidate gets a full
+`squared_l2`, with no early abandoning — so 10× the vectors should cost 10× the
+time. Measured under the current harness:
+
+| vectors | ms/query | ns per vector |
+|---|---|---|
+| 100,000 | 14.9 | 149 |
+| 1,000,000 | 63.3 | 63 |
+
+10× the data for **4.2×** the time. Per vector, the million-vector scan is
+**2.4× cheaper** than the hundred-thousand one, doing identical work.
+
+Three hypotheses, all tested and rejected:
+
+1. **Phase 5's 62 ms figure was stale.** No — re-measured at 1M under the current
+   best-of-N harness it comes out at 63.3 ms, agreeing with Phase 5. The old
+   number is sound.
+2. **The 100k run was contaminated by concurrent file writes** into a
+   OneDrive-synced folder, which did overlap it exactly. No — re-run on an idle
+   machine it gives 66.9 QPS against the original 66.2. Reproducible.
+3. **The bounded heap gets cheaper as the top-k threshold tightens.** No — the
+   heap skip only avoids a push/pop pair, the distance is computed either way,
+   and heap operations are O(k log n): far too rare to move a per-vector cost.
+
+A fixed per-query cost would explain the shape, but fitting one gives ~9.5 ms per
+query, implausible for a loop that allocates a single k-element heap. Cache and
+TLB effects predict the opposite sign — the smaller working set should be faster
+per vector, not slower.
+
+So it stands as an open, reproducible anomaly. **No conclusion in this document
+depends on it**: every comparison drawn above is between rows measured in one
+process against one dataset, and those are internally consistent. What it forbids
+is reading QPS across the two tables as a scaling law. The "2.9× at 10k, 14× at
+100k" claim survives because both ratios are within-table.
+
+Next step if picked up: measure brute force at 200k and 400k to see whether the
+curve is smoothly sublinear or 100k is an outlier.

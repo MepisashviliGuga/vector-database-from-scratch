@@ -59,7 +59,8 @@
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --release --example index_comparison -- -D warnings 2>&1 | Select-Object -Last 20)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example index_comparison -q -- benchmark/datasets/sift/sift 200 100000)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example index_comparison -q -- benchmark/datasets/sift/sift 200 1000000)",
-      "Read(//c/Users/Guga/AppData/Local/Temp/claude/C--Users-Guga-OneDrive---Kutaisi-International-University-Desktop-Vector-Database-Built-From-Scratch/3fe90b9a-9f6c-4538-9607-761c0a8b1d6e/tasks/**)"
+      "Read(//c/Users/Guga/AppData/Local/Temp/claude/C--Users-Guga-OneDrive---Kutaisi-International-University-Desktop-Vector-Database-Built-From-Scratch/3fe90b9a-9f6c-4538-9607-761c0a8b1d6e/tasks/**)",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib -q 2>&1 | Select-Object -Last 12)"
     ]
   }
 }
