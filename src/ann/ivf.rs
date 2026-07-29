@@ -190,7 +190,13 @@ impl IvfIndex {
             return Vec::new();
         }
 
-        let mut candidates: Vec<Neighbor> = Vec::new();
+        // A bounded max-heap of the best k, as the brute-force scan uses.
+        // Collecting every candidate and sorting would cost O(n log n) in the
+        // number *scanned* rather than O(n log k), which at a high `nprobe`
+        // makes the sort rival the distance estimation itself.
+        let mut best: std::collections::BinaryHeap<Neighbor> =
+            std::collections::BinaryHeap::with_capacity(k + 1);
+
         for (cluster, _) in self.centroids.nearest_centroids(query, nprobe) {
             let centroid = self
                 .centroids
@@ -203,16 +209,25 @@ impl IvfIndex {
 
             let list = &self.lists[cluster];
             for (&id, code) in list.ids.iter().zip(list.codes.iter()) {
-                candidates.push(Neighbor {
+                let candidate = Neighbor {
                     id: id as u64,
                     distance: self.quantizer.estimate_squared_distance(code, &prepared),
-                });
+                };
+                // Compare before making room: most candidates lose, and this
+                // skips a push/pop pair for each of them.
+                if best.len() == k {
+                    if best.peek().is_some_and(|worst| candidate >= *worst) {
+                        continue;
+                    }
+                    best.pop();
+                }
+                best.push(candidate);
             }
         }
 
-        candidates.sort_unstable();
-        candidates.truncate(k);
-        candidates
+        let mut results = best.into_vec();
+        results.sort_unstable();
+        results
     }
 
     /// Sizes of the lists a query would probe, for reporting how much of the

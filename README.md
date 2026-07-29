@@ -27,11 +27,12 @@ are reported rather than hidden.
 | 3 | Storage benchmarks, workload generator, range scans | done — [results](results/README.md) |
 | 4 | Brute-force exact k-NN baseline | done — validated against published SIFT ground truth |
 | 5 | Extended RaBitQ quantizer (paper 03) | done — [results](results/ann_recall.md) |
-| 5 | IVF clustering, then SymphonyQG graph (paper 04) | not started |
+| 5 | IVF over quantized residuals (k-means + inverted lists) | done — [results](results/ann_recall.md) |
+| 5 | SymphonyQG graph index (paper 04) | not started |
 | 6 | Integration, recall@k vs. QPS curves | not started |
 | 7 | Stretch: filtered search (paper 05), RusKey RL compaction (paper 06) | not started |
 
-Phases 0-4 are complete and Phase 5 is under way. 296 unit tests, clippy clean at
+Phases 0-4 are complete and Phase 5 is under way. 318 unit tests, clippy clean at
 `-D warnings`.
 
 The three growth schemes are pinned against paper 01's own running examples —
@@ -101,6 +102,8 @@ first — and stop at the first entry found for the key, **including a tombstone
 | `src/ann/fvecs.rs` | Readers for the SIFT/GIST `.fvecs` and `.ivecs` formats |
 | `src/ann/rotation.rs` | Random orthogonal matrix; moves the randomness out of the data and into `P` |
 | `src/ann/rabitq.rs` | Extended RaBitQ: normalized-grid codebook, Algorithm 1 encoding, unbiased estimator |
+| `src/ann/kmeans.rs` | Lloyd's k-means with k-means++ seeding |
+| `src/ann/ivf.rs` | Inverted-file index over quantized residuals |
 | `src/workload.rs` | Deterministic YCSB-style workload generator |
 | `src/bench.rs` | Measurement harness: amplification, throughput, p50/p99 |
 
@@ -116,6 +119,7 @@ cargo run --release --example ecotune_schedule    # what EcoTune's DP decides
 # ANN. Fetch a dataset first: benchmark/datasets/fetch.sh siftsmall
 cargo run --release --example ann_groundtruth     # validate the oracle
 cargo run --release --example rabitq_recall       # recall vs bits per dimension
+cargo run --release --example ivf_recall          # recall vs nprobe
 ```
 
 `crash_recovery` spawns a child that writes 5,000 records with per-write `fsync`,

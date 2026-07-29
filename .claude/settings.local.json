@@ -40,7 +40,8 @@
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example rabitq_recall -q)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example rabitq_recall -q -- benchmark/datasets/sift/sift 100 1,4,5,7)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example ivf_recall -q)",
-      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example ivf_recall -q -- benchmark/datasets/sift/sift 100 5 1024)"
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe run --release --example ivf_recall -q -- benchmark/datasets/sift/sift 100 5 1024)",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib \"ann::ivf\" --quiet 2>&1 | Select-String -Pattern \"^error|^  -->|test result|FAILED|panicked\" | Select-Object -First 12; C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --all-targets --quiet -- -D warnings 2>&1 | Select-String -Pattern \"^error|-->\" | Select-Object -First 5; \"CLIPPY: $LASTEXITCODE\")"
     ]
   }
 }
