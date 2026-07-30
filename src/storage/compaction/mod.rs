@@ -26,12 +26,14 @@ use super::shape::TreeShape;
 
 pub mod ecotune;
 pub mod fluid;
+pub mod lerp;
 pub mod leveling;
 pub mod propagation;
 pub mod tiering;
 
 pub use ecotune::{EcoTuneConfig, EcoTunePolicy};
 pub use fluid::Fluid;
+pub use lerp::{Lerp, LerpConfig, Mission};
 pub use leveling::Leveling;
 pub use propagation::{propagate_monkey, propagate_uniform, Policy};
 pub use tiering::Tiering;
