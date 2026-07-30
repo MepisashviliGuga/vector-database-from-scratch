@@ -29,8 +29,15 @@ fn main() -> std::io::Result<()> {
     let table = SSTable::open(&path)?;
     println!("entries        {}", meta.entry_count);
     println!("blocks         {}", meta.block_count);
-    println!("file size      {:.2} MiB", meta.file_size_bytes as f64 / (1024.0 * 1024.0));
-    println!("bloom bytes    {} ({:.2} bits/key)", table.bloom_bytes(), table.bloom_bytes() as f64 * 8.0 / n as f64);
+    println!(
+        "file size      {:.2} MiB",
+        meta.file_size_bytes as f64 / (1024.0 * 1024.0)
+    );
+    println!(
+        "bloom bytes    {} ({:.2} bits/key)",
+        table.bloom_bytes(),
+        table.bloom_bytes() as f64 * 8.0 / n as f64
+    );
 
     // Present keys: every lookup must succeed and cost exactly one block read.
     table.reset_counters();
@@ -38,7 +45,11 @@ fn main() -> std::io::Result<()> {
         let key = format!("key{:08}", i * 2);
         assert!(table.get(key.as_bytes())?.is_some());
     }
-    println!("\npresent keys   {n} lookups -> {} block reads, {} bloom rejections", table.blocks_read(), table.bloom_rejections());
+    println!(
+        "\npresent keys   {n} lookups -> {} block reads, {} bloom rejections",
+        table.blocks_read(),
+        table.bloom_rejections()
+    );
 
     // Absent keys interleaved between present ones: only the filter can save
     // these reads.
@@ -49,8 +60,14 @@ fn main() -> std::io::Result<()> {
         assert!(table.get(key.as_bytes())?.is_none());
     }
     let reads = table.blocks_read();
-    println!("absent keys    {probes} lookups -> {reads} block reads, {} bloom rejections", table.bloom_rejections());
-    println!("measured FPR   {:.4}% (target 1%)", reads as f64 / probes as f64 * 100.0);
+    println!(
+        "absent keys    {probes} lookups -> {reads} block reads, {} bloom rejections",
+        table.bloom_rejections()
+    );
+    println!(
+        "measured FPR   {:.4}% (target 1%)",
+        reads as f64 / probes as f64 * 100.0
+    );
 
     std::fs::remove_dir_all(&dir)?;
     Ok(())

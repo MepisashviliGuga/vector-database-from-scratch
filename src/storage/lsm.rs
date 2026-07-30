@@ -49,8 +49,8 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::compaction::{CompactionJob, Leveling, MergePolicy, RunFiles, Tiering};
 use super::compaction::EcoTuneConfig;
+use super::compaction::{CompactionJob, Leveling, MergePolicy, RunFiles, Tiering};
 use super::growth::{
     EcoTune, GrowthScheme, HorizontalLeveling, HorizontalPolicy, HorizontalTiering, Vertical,
     Vertiorizon,
@@ -317,12 +317,10 @@ impl Run {
     /// binary-search for the last file whose range starts at or before it, then
     /// probe that file alone.
     pub fn get(&self, key: &[u8]) -> io::Result<Option<Value>> {
-        let past = self
-            .tables
-            .partition_point(|table| match table.min_key() {
-                Some(min) => min.as_slice() <= key,
-                None => true,
-            });
+        let past = self.tables.partition_point(|table| match table.min_key() {
+            Some(min) => min.as_slice() <= key,
+            None => true,
+        });
         match past.checked_sub(1) {
             Some(index) => self.tables[index].get(key),
             // The key sorts before every file in this run.
@@ -340,9 +338,9 @@ impl Run {
     /// Skips the files that end before `start` entirely rather than opening and
     /// discarding them, so a scan costs work proportional to what it returns.
     fn source_from(&self, start: &[u8]) -> Source<'_> {
-        let first = self.tables.partition_point(|table| {
-            table.max_key().is_none_or(|max| max.as_slice() < start)
-        });
+        let first = self
+            .tables
+            .partition_point(|table| table.max_key().is_none_or(|max| max.as_slice() < start));
         let start = start.to_vec();
         Box::new(
             self.tables[first..]
@@ -676,7 +674,9 @@ impl LsmTree {
             .flat_map(|level_files| {
                 let level = self.levels.get(level_files.level);
                 level_files.runs.iter().filter_map(move |selection| {
-                    level.and_then(|runs| runs.get(selection.run)).map(Run::units)
+                    level
+                        .and_then(|runs| runs.get(selection.run))
+                        .map(Run::units)
                 })
             })
             .sum::<usize>()
@@ -963,9 +963,7 @@ fn coalesce_disjoint_runs(level: &mut Vec<Run>) {
         }
     }
     ranges.sort_by(|a, b| a.0.cmp(b.0));
-    let disjoint = ranges
-        .windows(2)
-        .all(|pair| pair[0].1 < pair[1].0);
+    let disjoint = ranges.windows(2).all(|pair| pair[0].1 < pair[1].0);
     if !disjoint {
         return;
     }
@@ -1394,7 +1392,11 @@ mod tests {
 
         for i in 0..600 {
             let key = format!("key{i:04}");
-            let expected = if i % 3 == 0 { None } else { Some(vec![b'v'; 50]) };
+            let expected = if i % 3 == 0 {
+                None
+            } else {
+                Some(vec![b'v'; 50])
+            };
             assert_eq!(
                 tree.get(key.as_bytes()).expect("get"),
                 expected,
@@ -1947,7 +1949,8 @@ mod tests {
         }
         tree.flush().expect("flush");
         for i in (0..300).step_by(3) {
-            tree.delete(format!("key{i:05}").into_bytes()).expect("delete");
+            tree.delete(format!("key{i:05}").into_bytes())
+                .expect("delete");
         }
         for i in (1..300).step_by(3) {
             tree.put(format!("key{i:05}").into_bytes(), v("new"))
@@ -1956,7 +1959,11 @@ mod tests {
 
         for (key, value) in tree.range_from(b"").map(|e| e.expect("scan")) {
             let index: usize = String::from_utf8_lossy(&key)[3..].parse().expect("index");
-            assert_ne!(index % 3, 0, "key{index:05} was deleted but the scan returned it");
+            assert_ne!(
+                index % 3,
+                0,
+                "key{index:05} was deleted but the scan returned it"
+            );
             let expected = if index % 3 == 1 { v("new") } else { v("old") };
             assert_eq!(value, expected, "wrong value for key{index:05}");
         }
@@ -2024,7 +2031,10 @@ mod tests {
             tree.put(key.into_bytes(), vec![b'v'; 50]).expect("put");
         }
         tree.flush().expect("flush");
-        assert!(tree.stats().runs_per_level.len() > 1, "expected several levels");
+        assert!(
+            tree.stats().runs_per_level.len() > 1,
+            "expected several levels"
+        );
 
         // Something still in the memtable, above everything on disk.
         tree.put(k("key00042"), v("freshest")).expect("put");

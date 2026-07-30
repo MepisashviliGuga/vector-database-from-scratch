@@ -109,10 +109,7 @@ impl Wal {
     /// shortened to the last verified record boundary before the append handle
     /// is opened. The discarded bytes were, by definition, never acknowledged to
     /// a caller.
-    pub fn recover(
-        path: impl AsRef<Path>,
-        sync_policy: SyncPolicy,
-    ) -> io::Result<(Self, Replay)> {
+    pub fn recover(path: impl AsRef<Path>, sync_policy: SyncPolicy) -> io::Result<(Self, Replay)> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -164,15 +161,15 @@ impl Wal {
             Value::Tombstone => (TAG_TOMBSTONE, &[]),
         };
 
-        let key_len: u32 = key
-            .len()
-            .try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "key too large for the log"))?;
-        let payload_len: u32 = (1 + 4 + key.len() + value_bytes.len())
-            .try_into()
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "record too large for the log")
-            })?;
+        let key_len: u32 = key.len().try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "key too large for the log")
+        })?;
+        let payload_len: u32 =
+            (1 + 4 + key.len() + value_bytes.len())
+                .try_into()
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "record too large for the log")
+                })?;
         if payload_len > MAX_PAYLOAD_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -427,7 +424,10 @@ mod tests {
             ],
             "order matters: replaying in sequence is what makes the last write win"
         );
-        assert_eq!(replay.discarded_tail_bytes, 0, "a clean log discards nothing");
+        assert_eq!(
+            replay.discarded_tail_bytes, 0,
+            "a clean log discards nothing"
+        );
     }
 
     #[test]
@@ -469,7 +469,10 @@ mod tests {
         }
         {
             let mut wal = Wal::open(&path, SyncPolicy::EveryWrite).expect("reopen");
-            assert!(wal.bytes_written() > 0, "reopen must see the existing bytes");
+            assert!(
+                wal.bytes_written() > 0,
+                "reopen must see the existing bytes"
+            );
             wal.append(b"second", &put("2")).expect("append");
         }
 
@@ -686,7 +689,8 @@ mod tests {
         // when the process died.
         {
             let mut file = OpenOptions::new().append(true).open(&path).expect("open");
-            file.write_all(b"\x40\x00\x00\x00\x99\x99\x99").expect("write junk");
+            file.write_all(b"\x40\x00\x00\x00\x99\x99\x99")
+                .expect("write junk");
         }
         let torn_len = std::fs::metadata(&path).expect("metadata").len();
 
@@ -707,7 +711,11 @@ mod tests {
         wal.sync().expect("sync");
 
         let after = Wal::replay(&path).expect("replay");
-        assert_eq!(after.records.len(), 3, "the post-crash write must be recoverable");
+        assert_eq!(
+            after.records.len(),
+            3,
+            "the post-crash write must be recoverable"
+        );
         assert_eq!(after.discarded_tail_bytes, 0);
     }
 

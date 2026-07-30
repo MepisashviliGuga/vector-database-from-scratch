@@ -148,11 +148,7 @@ pub fn solve(a: f32, b: f32) -> AlphaSet {
 /// their solution sets — Lemma 4.2.
 ///
 /// Arguments are the three pairwise distances of the triangle.
-pub fn pruned_by(
-    xy: HybridDistance,
-    xz: HybridDistance,
-    yz: HybridDistance,
-) -> AlphaSet {
+pub fn pruned_by(xy: HybridDistance, xz: HybridDistance, yz: HybridDistance) -> AlphaSet {
     // Eq 4: the rearrangement of Eq 2.
     let first = solve(xz.e - xy.e + xy.s - xz.s, xy.s - xz.s);
     // Eq 5: the same with (y,z) in place of (x,z).
@@ -166,12 +162,7 @@ pub fn pruned_by(
 /// so the closed-form [`pruned_by`] can be checked against it pointwise, which
 /// is what catches a sign error in the case analysis that golden values alone
 /// would not.
-pub fn prunes_at(
-    alpha: f32,
-    xy: HybridDistance,
-    xz: HybridDistance,
-    yz: HybridDistance,
-) -> bool {
+pub fn prunes_at(alpha: f32, xy: HybridDistance, xz: HybridDistance, yz: HybridDistance) -> bool {
     let longest = xy.at(alpha);
     xz.at(alpha) < longest && yz.at(alpha) < longest
 }
@@ -205,7 +196,10 @@ mod tests {
         // that the edge (x,y) will not be pruned due to the presence of node z."
         // Example 2 adds that this row "falls under case 2, resulting in r₁ = ∅".
         let (xy, xz, yz) = table_1(1);
-        assert_eq!(solve(xz.e - xy.e + xy.s - xz.s, xy.s - xz.s), AlphaSet::empty());
+        assert_eq!(
+            solve(xz.e - xy.e + xy.s - xz.s, xy.s - xz.s),
+            AlphaSet::empty()
+        );
         assert!(pruned_by(xy, xz, yz).is_empty());
     }
 
@@ -230,14 +224,23 @@ mod tests {
         let second = solve(yz.e - xy.e + xy.s - yz.s, xy.s - yz.s);
         assert_eq!(first.intervals().len(), 1);
         assert_eq!(second.intervals().len(), 1);
-        assert!((first.intervals()[0].0 - 2.0 / 3.0).abs() < 1e-6, "{first:?}");
+        assert!(
+            (first.intervals()[0].0 - 2.0 / 3.0).abs() < 1e-6,
+            "{first:?}"
+        );
         assert_eq!(first.intervals()[0].1, 1.0);
-        assert!((second.intervals()[0].0 - 1.0 / 3.0).abs() < 1e-6, "{second:?}");
+        assert!(
+            (second.intervals()[0].0 - 1.0 / 3.0).abs() < 1e-6,
+            "{second:?}"
+        );
         assert_eq!(second.intervals()[0].1, 1.0);
 
         let pruned = pruned_by(xy, xz, yz);
         assert_eq!(pruned.intervals().len(), 1);
-        assert!((pruned.intervals()[0].0 - 2.0 / 3.0).abs() < 1e-6, "{pruned:?}");
+        assert!(
+            (pruned.intervals()[0].0 - 2.0 / 3.0).abs() < 1e-6,
+            "{pruned:?}"
+        );
         assert_eq!(pruned.intervals()[0].1, 1.0);
     }
 
@@ -249,8 +252,14 @@ mod tests {
         let (xy, xz, yz) = table_1(3);
         let pruned = pruned_by(xy, xz, yz);
         assert!(!pruned.is_empty() && !pruned.is_full());
-        assert!(!pruned.contains(0.0), "kept when the second modality dominates");
-        assert!(pruned.contains(1.0), "pruned when the first modality dominates");
+        assert!(
+            !pruned.contains(0.0),
+            "kept when the second modality dominates"
+        );
+        assert!(
+            pruned.contains(1.0),
+            "pruned when the first modality dominates"
+        );
     }
 
     /// Every row of Table 1, checked pointwise against the definition.
@@ -354,7 +363,10 @@ mod tests {
         // so the sign noise cannot resurrect an edge the paper says survives.
         let (xy, xz, _) = table_1(1);
         let a = xz.e - xy.e + xy.s - xz.s;
-        assert!(a.abs() < 1e-6, "A should be within rounding of zero, got {a}");
+        assert!(
+            a.abs() < 1e-6,
+            "A should be within rounding of zero, got {a}"
+        );
         assert!(solve(a, xy.s - xz.s).is_empty());
     }
 
@@ -379,7 +391,10 @@ mod tests {
         for &(a, b) in &[(0.0, 0.5), (0.0, -0.5), (0.0, 0.0)] {
             let got = solve(a, b);
             for &(low, high) in got.intervals() {
-                assert!(low.is_finite() && high.is_finite(), "solve({a},{b}) = {got:?}");
+                assert!(
+                    low.is_finite() && high.is_finite(),
+                    "solve({a},{b}) = {got:?}"
+                );
             }
         }
     }

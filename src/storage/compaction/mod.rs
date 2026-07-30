@@ -136,10 +136,7 @@ pub(crate) fn all_files(tree: &TreeShape, level: usize) -> Vec<RunFiles> {
 ///
 /// Honours [`CompactionRequest::merge_units`] when set, taking only the newest
 /// runs whose unit counts reach it.
-pub(crate) fn all_source_levels(
-    tree: &TreeShape,
-    request: CompactionRequest,
-) -> Vec<LevelFiles> {
+pub(crate) fn all_source_levels(tree: &TreeShape, request: CompactionRequest) -> Vec<LevelFiles> {
     request
         .source_levels()
         .filter_map(|level| {
@@ -162,11 +159,7 @@ pub(crate) fn all_source_levels(
 /// Stops short rather than overshooting: taking a run that carries more units
 /// than remain would merge data the schedule assigned to a later, separate final
 /// run.
-pub(crate) fn newest_runs_by_units(
-    tree: &TreeShape,
-    level: usize,
-    units: usize,
-) -> Vec<RunFiles> {
+pub(crate) fn newest_runs_by_units(tree: &TreeShape, level: usize, units: usize) -> Vec<RunFiles> {
     let Some(shape) = tree.level(level) else {
         return Vec::new();
     };

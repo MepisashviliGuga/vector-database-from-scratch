@@ -151,7 +151,11 @@ impl HybridSet {
     ///
     /// If either query vector has the wrong length.
     pub fn query_distance(&self, query_e: &[f32], query_s: &[f32], id: usize) -> HybridDistance {
-        assert_eq!(query_e.len(), self.dim_e, "primary query has the wrong length");
+        assert_eq!(
+            query_e.len(),
+            self.dim_e,
+            "primary query has the wrong length"
+        );
         assert_eq!(
             query_s.len(),
             self.dim_s,
@@ -375,20 +379,17 @@ mod tests {
         // Few enough pairs to force the sampling path rather than exhaustive.
         let a = HybridSet::new(primary.clone(), 4, secondary.clone(), 2, 64, 12345);
         let b = HybridSet::new(primary.clone(), 4, secondary.clone(), 2, 64, 12345);
-        assert_eq!(a.maxima(), b.maxima(), "same seed must give the same maxima");
+        assert_eq!(
+            a.maxima(),
+            b.maxima(),
+            "same seed must give the same maxima"
+        );
 
         let c = HybridSet::new(primary, 4, secondary, 2, 64, 54321);
         // Not asserting inequality — a different seed *may* find the same pair —
         // only that the estimate never exceeds the true maximum.
         let (exact_e, exact_s) = {
-            let full = HybridSet::new(
-                a.primary.clone(),
-                4,
-                a.secondary.clone(),
-                2,
-                usize::MAX,
-                0,
-            );
+            let full = HybridSet::new(a.primary.clone(), 4, a.secondary.clone(), 2, usize::MAX, 0);
             full.maxima()
         };
         for set in [&a, &c] {

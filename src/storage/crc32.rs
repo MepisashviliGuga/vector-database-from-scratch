@@ -70,9 +70,7 @@ impl Default for Crc32 {
 
 impl Crc32 {
     pub fn new() -> Self {
-        Self {
-            state: 0xFFFF_FFFF,
-        }
+        Self { state: 0xFFFF_FFFF }
     }
 
     pub fn update(&mut self, data: &[u8]) {

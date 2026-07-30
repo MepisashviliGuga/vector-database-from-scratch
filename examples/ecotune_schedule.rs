@@ -60,7 +60,10 @@ fn show(label: &str, config: EcoTuneConfig) {
         gaps.push(merge.after_unit_runs - previous);
         previous = merge.after_unit_runs;
     }
-    println!("  {} chosen merges, gaps between them {gaps:?}", chosen.len());
+    println!(
+        "  {} chosen merges, gaps between them {gaps:?}",
+        chosen.len()
+    );
 }
 
 fn main() {

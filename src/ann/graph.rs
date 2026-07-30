@@ -129,7 +129,10 @@ impl GraphIndex {
                         .iter()
                         .map(|&other| Neighbor {
                             id: other as u64,
-                            distance: squared_l2(index.vector(target), index.vector(other as usize)),
+                            distance: squared_l2(
+                                index.vector(target),
+                                index.vector(other as usize),
+                            ),
                         })
                         .collect();
                     let mut sorted = existing;
@@ -444,8 +447,15 @@ mod tests {
         for id in 0..index.len() {
             let neighbours = index.neighbours(id);
             let unique: std::collections::HashSet<u32> = neighbours.iter().copied().collect();
-            assert_eq!(unique.len(), neighbours.len(), "vertex {id} has a duplicate edge");
-            assert!(!neighbours.contains(&(id as u32)), "vertex {id} links to itself");
+            assert_eq!(
+                unique.len(),
+                neighbours.len(),
+                "vertex {id} has a duplicate edge"
+            );
+            assert!(
+                !neighbours.contains(&(id as u32)),
+                "vertex {id} links to itself"
+            );
         }
     }
 

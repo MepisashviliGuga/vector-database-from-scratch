@@ -155,8 +155,14 @@ mod tests {
     #[test]
     fn domination_needs_one_strict_improvement() {
         let a = HybridDistance::new(0.2, 0.3);
-        assert!(dominates(a, HybridDistance::new(0.4, 0.5)), "better in both");
-        assert!(dominates(a, HybridDistance::new(0.2, 0.5)), "tie then better");
+        assert!(
+            dominates(a, HybridDistance::new(0.4, 0.5)),
+            "better in both"
+        );
+        assert!(
+            dominates(a, HybridDistance::new(0.2, 0.5)),
+            "tie then better"
+        );
         assert!(!dominates(a, a), "identical points do not dominate");
         assert!(
             !dominates(a, HybridDistance::new(0.1, 0.9)),
@@ -261,7 +267,9 @@ mod tests {
             let (frontier, rest) = split_frontier(&points);
             for dropped in &rest {
                 assert!(
-                    frontier.iter().any(|kept| dominates(kept.distance, dropped.distance)),
+                    frontier
+                        .iter()
+                        .any(|kept| dominates(kept.distance, dropped.distance)),
                     "trial {trial}: {dropped:?} was dropped but nothing on the frontier \
                      dominates it\nfrontier={frontier:?}"
                 );
@@ -291,7 +299,10 @@ mod tests {
         seen.sort_unstable();
         let mut expected: Vec<u32> = points.iter().map(|p| p.id).collect();
         expected.sort_unstable();
-        assert_eq!(seen, expected, "every point should land in exactly one layer");
+        assert_eq!(
+            seen, expected,
+            "every point should land in exactly one layer"
+        );
     }
 
     #[test]
@@ -306,7 +317,11 @@ mod tests {
             .collect();
 
         let layers = frontier_layers(&points, points.len());
-        assert!(layers.len() >= 2, "expected several layers, got {}", layers.len());
+        assert!(
+            layers.len() >= 2,
+            "expected several layers, got {}",
+            layers.len()
+        );
         for depth in 1..layers.len() {
             for candidate in &layers[depth] {
                 let dominated_by_previous = layers[depth - 1]

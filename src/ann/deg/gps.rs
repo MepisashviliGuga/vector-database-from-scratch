@@ -214,13 +214,9 @@ mod tests {
             let set = random_set(60, 100 + trial);
             let inserting = set.len() - 1;
             let built = inserting; // ids 0..built exist; `inserting` does not yet
-            let layers = gps(
-                &[0],
-                200,
-                built,
-                distances(&set, inserting),
-                |_, out| out.extend(0..built as u32),
-            );
+            let layers = gps(&[0], 200, built, distances(&set, inserting), |_, out| {
+                out.extend(0..built as u32)
+            });
             assert!(!layers.is_empty());
 
             for step in 0..=20 {

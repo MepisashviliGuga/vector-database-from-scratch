@@ -64,9 +64,7 @@ fn main() -> std::io::Result<()> {
     let non_empty = sizes.iter().filter(|&&s| s > 0).count();
     let largest = sizes.iter().max().copied().unwrap_or(0);
     let mean = index.len() as f64 / non_empty.max(1) as f64;
-    println!(
-        "  {non_empty}/{clusters} lists used, mean {mean:.0}, largest {largest}"
-    );
+    println!("  {non_empty}/{clusters} lists used, mean {mean:.0}, largest {largest}");
 
     let raw_bytes = base.count() * dimension * 4;
     println!(

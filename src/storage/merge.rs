@@ -407,7 +407,9 @@ mod tests {
         let new_path = dir.join("new.sst");
         let mut writer = SSTableWriter::create(&new_path).expect("create");
         writer.append(b"bravo", &put("newer")).expect("append");
-        writer.append(b"charlie", &Value::Tombstone).expect("append");
+        writer
+            .append(b"charlie", &Value::Tombstone)
+            .expect("append");
         writer.finish().expect("finish");
 
         // Newest of all: the in-memory buffer.

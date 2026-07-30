@@ -330,12 +330,7 @@ impl DegIndex {
         ordered.sort_unstable();
         ordered
             .into_iter()
-            .map(|n| {
-                ParetoPoint::new(
-                    n.id as u32,
-                    self.set.distance(inserting, n.id as usize),
-                )
-            })
+            .map(|n| ParetoPoint::new(n.id as u32, self.set.distance(inserting, n.id as usize)))
             .collect()
     }
 
@@ -381,10 +376,7 @@ impl DegIndex {
             }
             let edge_length = candidate.distance.at(alpha);
             let pruned = kept.iter().any(|existing| {
-                let to_existing = self
-                    .set
-                    .distance(id, existing.target as usize)
-                    .at(alpha);
+                let to_existing = self.set.distance(id, existing.target as usize).at(alpha);
                 let between = self
                     .set
                     .distance(candidate.id as usize, existing.target as usize)
@@ -568,10 +560,7 @@ impl DegIndex {
 
                 let candidate = Neighbor {
                     id: edge.target as u64,
-                    distance: self
-                        .set
-                        .query_distance(query_e, query_s, target)
-                        .at(alpha),
+                    distance: self.set.query_distance(query_e, query_s, target).at(alpha),
                 };
                 if !full || candidate.distance < worst {
                     frontier.push(Reverse(candidate));
@@ -804,10 +793,7 @@ mod tests {
                 if target <= id {
                     continue;
                 }
-                let Some(back) = index
-                    .edges(target)
-                    .iter()
-                    .find(|e| e.target as usize == id)
+                let Some(back) = index.edges(target).iter().find(|e| e.target as usize == id)
                 else {
                     continue;
                 };

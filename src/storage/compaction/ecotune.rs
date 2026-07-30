@@ -206,14 +206,24 @@ impl EcoTunePolicy {
     }
 
     /// The optimiser's choice at a state, if that state was reachable.
-    pub fn decision(&self, existing_runs: usize, incoming: usize, pending: usize) -> Option<Decision> {
+    pub fn decision(
+        &self,
+        existing_runs: usize,
+        incoming: usize,
+        pending: usize,
+    ) -> Option<Decision> {
         self.decisions
             .get(&(existing_runs, incoming, pending))
             .copied()
     }
 
     /// How many unit runs to merge at a state. `1` means leave it alone.
-    pub fn merge_width(&self, existing_runs: usize, incoming: usize, pending: usize) -> Option<usize> {
+    pub fn merge_width(
+        &self,
+        existing_runs: usize,
+        incoming: usize,
+        pending: usize,
+    ) -> Option<usize> {
         self.decision(existing_runs, incoming, pending)
             .map(|decision| decision.merge_width)
     }
@@ -323,8 +333,7 @@ fn solve_state(
     // Line 4: the last unit run of the problem. The merge that follows carries
     // this run plus everything pending, and runs at the reduced query speed.
     if incoming == 1 {
-        let score =
-            (pending + 1) as f64 * config.rewrite_time * config.mlc_query_speed(existing);
+        let score = (pending + 1) as f64 * config.rewrite_time * config.mlc_query_speed(existing);
         memo.insert(
             (existing, incoming, pending),
             Decision {
@@ -471,7 +480,9 @@ mod tests {
             (1, 7 - x, 21 + x)
         };
         assert!(
-            policy.decision(expected_right.0, expected_right.1, expected_right.2).is_some(),
+            policy
+                .decision(expected_right.0, expected_right.1, expected_right.2)
+                .is_some(),
             "expected the right sub-problem {expected_right:?} to have been solved"
         );
     }
@@ -646,7 +657,11 @@ mod tests {
         });
         assert!(policy.score().is_finite());
         let schedule = policy.schedule();
-        assert_eq!(schedule.len(), 1, "just the round-ending merge: {schedule:?}");
+        assert_eq!(
+            schedule.len(),
+            1,
+            "just the round-ending merge: {schedule:?}"
+        );
     }
 
     /// The schedule must account for every unit run exactly once, or the policy

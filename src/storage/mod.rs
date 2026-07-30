@@ -25,10 +25,10 @@ pub use growth::{
     Vertiorizon,
 };
 pub use lsm::{GrowthKind, LsmConfig, LsmStats, LsmTree, MergeKind, Run};
-pub use shape::{LevelShape, RunShape, TreeShape};
 pub use manifest::Manifest;
 pub use memtable::{MemTable, Value};
 pub use merge::MergeIterator;
+pub use shape::{LevelShape, RunShape, TreeShape};
 pub use sstable::{SSTable, SSTableMeta, SSTableWriter};
 pub use vlog::{ValueLog, ValuePointer};
 pub use wal::{Replay, SyncPolicy, Wal};

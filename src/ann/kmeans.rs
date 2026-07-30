@@ -40,7 +40,10 @@ pub struct KMeans {
 
 impl KMeans {
     pub fn clusters(&self) -> usize {
-        self.centroids.len().checked_div(self.dimension).unwrap_or(0)
+        self.centroids
+            .len()
+            .checked_div(self.dimension)
+            .unwrap_or(0)
     }
 
     pub fn centroid(&self, index: usize) -> Option<&[f32]> {
@@ -161,7 +164,8 @@ pub fn train(
                 // An empty cluster contributes nothing and would stay empty
                 // forever. Re-seed it on the point currently worst served by its
                 // own centroid, which is where an extra centroid helps most.
-                if let Some(worst) = farthest_point(data, dimension, count, &centroids, &assignments)
+                if let Some(worst) =
+                    farthest_point(data, dimension, count, &centroids, &assignments)
                 {
                     let source = vector_at(worst);
                     centroids[cluster * dimension..(cluster + 1) * dimension]
@@ -405,7 +409,11 @@ mod tests {
 
         let mut used = std::collections::HashSet::new();
         for index in 0..count {
-            used.insert(model.assign(&data[index * dimension..(index + 1) * dimension]).0);
+            used.insert(
+                model
+                    .assign(&data[index * dimension..(index + 1) * dimension])
+                    .0,
+            );
         }
         assert!(
             used.len() >= 6,
@@ -459,14 +467,21 @@ mod tests {
         // More clusters than points.
         let data = vec![1.0f32, 2.0, 3.0, 4.0];
         let model = train(&data, 2, 10, 20, 59);
-        assert_eq!(model.clusters(), 2, "clusters are capped at the point count");
+        assert_eq!(
+            model.clusters(),
+            2,
+            "clusters are capped at the point count"
+        );
 
         // Every point identical: all distances zero, so seeding cannot sample
         // proportionally to distance.
         let identical = vec![5.0f32; 40];
         let model = train(&identical, 4, 3, 20, 61);
         assert_eq!(model.clusters(), 3);
-        assert!(model.inertia.abs() < 1e-6, "identical points have no spread");
+        assert!(
+            model.inertia.abs() < 1e-6,
+            "identical points have no spread"
+        );
     }
 
     #[test]

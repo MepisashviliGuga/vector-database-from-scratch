@@ -177,8 +177,16 @@ impl RaBitQ {
     ///
     /// If either slice is the wrong length.
     pub fn encode(&self, raw: &[f32], centroid: &[f32]) -> Code {
-        assert_eq!(raw.len(), self.dimension, "data vector has the wrong length");
-        assert_eq!(centroid.len(), self.dimension, "centroid has the wrong length");
+        assert_eq!(
+            raw.len(),
+            self.dimension,
+            "data vector has the wrong length"
+        );
+        assert_eq!(
+            centroid.len(),
+            self.dimension,
+            "centroid has the wrong length"
+        );
 
         let residual: Vec<f32> = raw
             .iter()
@@ -209,14 +217,22 @@ impl RaBitQ {
         let grid_norm = norm_squared.sqrt();
 
         // ⟨ō,o⟩ = ⟨ȳ/‖ȳ‖, o'⟩, which is exactly what the search maximised.
-        let cosine_to_original = if grid_norm > 0.0 { inner / grid_norm } else { 0.0 };
+        let cosine_to_original = if grid_norm > 0.0 {
+            inner / grid_norm
+        } else {
+            0.0
+        };
 
         // Signed grid value, then shifted into an unsigned code.
         let codes = magnitudes
             .iter()
             .zip(rotated.iter())
             .map(|(&magnitude, &component)| {
-                let signed = if component < 0.0 { -magnitude } else { magnitude };
+                let signed = if component < 0.0 {
+                    -magnitude
+                } else {
+                    magnitude
+                };
                 (signed + self.offset).round() as u8
             })
             .collect();
@@ -274,7 +290,10 @@ impl RaBitQ {
             }
         }
 
-        while let Some(Critical { dimension, step, .. }) = pending.pop() {
+        while let Some(Critical {
+            dimension, step, ..
+        }) = pending.pop()
+        {
             let magnitude = &mut magnitudes[dimension];
             // ‖y‖² gains (m+1)² − m² = 2m + 1; ⟨y,o'⟩ gains one unit of |o'[i]|.
             norm_squared += 2.0 * *magnitude + 1.0;
@@ -316,7 +335,11 @@ impl RaBitQ {
     /// If either slice is the wrong length.
     pub fn prepare_query(&self, raw: &[f32], centroid: &[f32]) -> Query {
         assert_eq!(raw.len(), self.dimension, "query has the wrong length");
-        assert_eq!(centroid.len(), self.dimension, "centroid has the wrong length");
+        assert_eq!(
+            centroid.len(),
+            self.dimension,
+            "centroid has the wrong length"
+        );
 
         let residual: Vec<f32> = raw
             .iter()
@@ -670,7 +693,8 @@ mod tests {
             let code = quantizer.encode(vector, &centroid);
             let estimated = quantizer.estimate_squared_distance(&code, &prepared);
             let truth = crate::ann::squared_l2(vector, &query);
-            worst_relative_error = worst_relative_error.max((estimated - truth).abs() / truth.max(1e-6));
+            worst_relative_error =
+                worst_relative_error.max((estimated - truth).abs() / truth.max(1e-6));
         }
 
         assert!(
@@ -690,8 +714,13 @@ mod tests {
         let mut rng = Rng::new(59);
         let centroid = zero_centroid(dimension);
 
-        let data: Vec<Vec<f32>> = (0..2000).map(|_| random_unit(dimension, &mut rng)).collect();
-        let codes: Vec<Code> = data.iter().map(|v| quantizer.encode(v, &centroid)).collect();
+        let data: Vec<Vec<f32>> = (0..2000)
+            .map(|_| random_unit(dimension, &mut rng))
+            .collect();
+        let codes: Vec<Code> = data
+            .iter()
+            .map(|v| quantizer.encode(v, &centroid))
+            .collect();
 
         let mut total_recall = 0.0;
         let queries = 20;
@@ -747,7 +776,10 @@ mod tests {
         let prepared = quantizer.prepare_query(&centroid, &centroid);
         let distance = quantizer.estimate_squared_distance(&code, &prepared);
         assert!(distance.is_finite(), "got {distance}");
-        assert!(distance < 1e-3, "a point at the centroid is zero from itself");
+        assert!(
+            distance < 1e-3,
+            "a point at the centroid is zero from itself"
+        );
     }
 
     #[test]
@@ -772,7 +804,11 @@ mod tests {
         let quantizer = RaBitQ::new(128, 4, 1);
         // 128 dimensions of f32 is 512 bytes; 4-bit packed codes are 64.
         assert_eq!(quantizer.packed_code_bytes(), 64);
-        assert_eq!(quantizer.code_bytes(), 128, "unpacked, one byte per dimension");
+        assert_eq!(
+            quantizer.code_bytes(),
+            128,
+            "unpacked, one byte per dimension"
+        );
 
         assert_eq!(RaBitQ::new(128, 1, 1).packed_code_bytes(), 16, "32x");
         assert_eq!(RaBitQ::new(128, 8, 1).packed_code_bytes(), 128, "4x");

@@ -209,8 +209,13 @@ fn main() -> std::io::Result<()> {
     let primary: Vec<f32> = base.data[..count * dim_e].to_vec();
 
     println!("DEG α sweep — paper 05 Figure 2");
-    println!("  {count} objects, primary {dim_e}-D (SIFT), secondary {SECONDARY_DIM}-D (synthetic)");
-    println!("  {} queries, recall@{K}", query_limit.min(raw_queries.count()));
+    println!(
+        "  {count} objects, primary {dim_e}-D (SIFT), secondary {SECONDARY_DIM}-D (synthetic)"
+    );
+    println!(
+        "  {} queries, recall@{K}",
+        query_limit.min(raw_queries.count())
+    );
     println!("  beam {beam}, max_degree {degree}, build_pool {build_pool}\n");
 
     for regime in [Regime::Independent, Regime::Correlated] {
@@ -237,7 +242,11 @@ fn main() -> std::io::Result<()> {
             // copies of base coordinates; the correlated regime derives them from
             // the query vectors, where the seed must match to reuse the same
             // projection matrix.
-            if regime == Regime::Correlated { 0xD_E9 } else { 0xB_EE },
+            if regime == Regime::Correlated {
+                0xD_E9
+            } else {
+                0xB_EE
+            },
         );
         let queries: Vec<(Vec<f32>, Vec<f32>)> = query_rows
             .iter()

@@ -41,7 +41,11 @@ impl Rng {
     /// A seed of 0 would leave xorshift stuck at 0 forever, so it is nudged.
     pub fn new(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed },
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
         }
     }
 
@@ -164,8 +168,7 @@ impl KeyGenerator {
                 if uz < 1.0 + 0.5f64.powf(theta) {
                     return 1;
                 }
-                let id = (self.key_count as f64
-                    * (self.eta * u - self.eta + 1.0).powf(self.alpha))
+                let id = (self.key_count as f64 * (self.eta * u - self.eta + 1.0).powf(self.alpha))
                     as u64;
                 id.min(self.key_count - 1)
             }
@@ -181,11 +184,21 @@ fn zeta(n: u64, theta: f64) -> f64 {
 /// One operation for the engine to perform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
-    Put { key: Vec<u8>, value: Vec<u8> },
-    Get { key: Vec<u8> },
-    Delete { key: Vec<u8> },
+    Put {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Get {
+        key: Vec<u8>,
+    },
+    Delete {
+        key: Vec<u8>,
+    },
     /// A range scan starting at `key`, reading up to `length` entries.
-    Scan { key: Vec<u8>, length: usize },
+    Scan {
+        key: Vec<u8>,
+        length: usize,
+    },
 }
 
 impl Operation {
@@ -368,7 +381,6 @@ impl Workload {
             }
         }
     }
-
 }
 
 /// An endless stream of operations. Bound it with [`Iterator::take`].
@@ -393,11 +405,17 @@ mod tests {
     /// number can be re-derived.
     #[test]
     fn the_same_seed_gives_the_same_stream() {
-        let first: Vec<u64> = (0..100).scan(Rng::new(7), |r, _| Some(r.next_u64())).collect();
-        let second: Vec<u64> = (0..100).scan(Rng::new(7), |r, _| Some(r.next_u64())).collect();
+        let first: Vec<u64> = (0..100)
+            .scan(Rng::new(7), |r, _| Some(r.next_u64()))
+            .collect();
+        let second: Vec<u64> = (0..100)
+            .scan(Rng::new(7), |r, _| Some(r.next_u64()))
+            .collect();
         assert_eq!(first, second);
 
-        let different: Vec<u64> = (0..100).scan(Rng::new(8), |r, _| Some(r.next_u64())).collect();
+        let different: Vec<u64> = (0..100)
+            .scan(Rng::new(8), |r, _| Some(r.next_u64()))
+            .collect();
         assert_ne!(first, different, "different seeds must diverge");
     }
 
@@ -604,7 +622,10 @@ mod tests {
             .filter(|_| workload.generate().kind() == "get")
             .count();
         let share = gets as f64 / draws as f64;
-        assert!((share - 0.5).abs() < 0.02, "gets were {share:.3}, expected 0.5");
+        assert!(
+            (share - 0.5).abs() < 0.02,
+            "gets were {share:.3}, expected 0.5"
+        );
     }
 
     #[test]

@@ -69,14 +69,24 @@ fn main() -> std::io::Result<()> {
     let secondary: Vec<f32> = (0..count * SECONDARY_DIM)
         .map(|_| rng.next_f64() as f32)
         .collect();
-    let set = HybridSet::new(primary.clone(), dim_e, secondary, SECONDARY_DIM, 100_000, 17);
+    let set = HybridSet::new(
+        primary.clone(),
+        dim_e,
+        secondary,
+        SECONDARY_DIM,
+        100_000,
+        17,
+    );
 
     let queries: Vec<Vec<f32>> = raw_queries.rows().into_iter().take(100).collect();
     let dummy_secondary = vec![0.0f32; SECONDARY_DIM];
 
     println!("DEG diagnosis — everything measured at α = 1, where the hybrid");
     println!("distance is δe alone and a plain graph solves the same problem.");
-    println!("  {count} objects × {dim_e}-D, {} queries, recall@{K}, beam {beam}\n", queries.len());
+    println!(
+        "  {count} objects × {dim_e}-D, {} queries, recall@{K}, beam {beam}\n",
+        queries.len()
+    );
 
     // Ground truth: exact δe nearest neighbours.
     print!("exact neighbours... ");
@@ -139,12 +149,42 @@ fn main() -> std::io::Result<()> {
     // yield the same number of usable candidates. If a bigger pool closes the
     // gap, GPS is under-provisioned rather than wrong.
     let arms = [
-        ("GPS + edge seeds (paper)", CandidateSource::Gps, EntryPolicy::EdgeSeeds, 64),
-        ("GPS + interior entry", CandidateSource::Gps, EntryPolicy::Interior, 64),
-        ("GPS + edge seeds, pool 256", CandidateSource::Gps, EntryPolicy::EdgeSeeds, 256),
-        ("GPS + edge seeds, pool 1024", CandidateSource::Gps, EntryPolicy::EdgeSeeds, 1024),
-        ("beam + edge seeds", CandidateSource::Beam, EntryPolicy::EdgeSeeds, 64),
-        ("beam + interior entry", CandidateSource::Beam, EntryPolicy::Interior, 64),
+        (
+            "GPS + edge seeds (paper)",
+            CandidateSource::Gps,
+            EntryPolicy::EdgeSeeds,
+            64,
+        ),
+        (
+            "GPS + interior entry",
+            CandidateSource::Gps,
+            EntryPolicy::Interior,
+            64,
+        ),
+        (
+            "GPS + edge seeds, pool 256",
+            CandidateSource::Gps,
+            EntryPolicy::EdgeSeeds,
+            256,
+        ),
+        (
+            "GPS + edge seeds, pool 1024",
+            CandidateSource::Gps,
+            EntryPolicy::EdgeSeeds,
+            1024,
+        ),
+        (
+            "beam + edge seeds",
+            CandidateSource::Beam,
+            EntryPolicy::EdgeSeeds,
+            64,
+        ),
+        (
+            "beam + interior entry",
+            CandidateSource::Beam,
+            EntryPolicy::Interior,
+            64,
+        ),
     ];
 
     for (label, candidates, entry, build_pool) in arms {

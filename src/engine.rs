@@ -523,15 +523,10 @@ mod tests {
                     rerank_candidates: 200,
                 },
             )?;
-            with_rerank +=
-                reranked.iter().filter(|n| truth.contains(&n.id)).count() as f64 / 10.0;
+            with_rerank += reranked.iter().filter(|n| truth.contains(&n.id)).count() as f64 / 10.0;
 
             // The same candidate pass, but taking the index's own ordering.
-            let raw = store
-                .index
-                .as_ref()
-                .expect("index")
-                .search(query, 10, 8);
+            let raw = store.index.as_ref().expect("index").search(query, 10, 8);
             index_only += raw.iter().filter(|n| truth.contains(&n.id)).count() as f64 / 10.0;
         }
 
@@ -586,7 +581,11 @@ mod tests {
             .into_iter()
             .map(|n| n.id)
             .collect();
-        assert_eq!(found, exact(&vectors, query, 5), "the fallback must be exact");
+        assert_eq!(
+            found,
+            exact(&vectors, query, 5),
+            "the fallback must be exact"
+        );
         Ok(())
     }
 
@@ -677,7 +676,10 @@ mod tests {
 
         store.insert(5, &vectors[5], b"back")?;
         assert!(store.get(5)?.is_some());
-        assert!(!store.deleted.contains(&5), "a revived id must leave the deleted set");
+        assert!(
+            !store.deleted.contains(&5),
+            "a revived id must leave the deleted set"
+        );
 
         let found = store.search(&vectors[5], 1, SearchParams::default())?;
         assert_eq!(found[0].id, 5);

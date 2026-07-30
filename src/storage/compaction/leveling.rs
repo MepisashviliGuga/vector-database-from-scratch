@@ -434,7 +434,11 @@ mod tests {
                 },
             ],
         };
-        assert!(Leveling.plan(&tree, full(0)).expect("job").targets.is_empty());
+        assert!(Leveling
+            .plan(&tree, full(0))
+            .expect("job")
+            .targets
+            .is_empty());
     }
 
     /// The span is the union across *all* source files, not just the first.
@@ -463,7 +467,12 @@ mod tests {
         let shallow = TreeShape {
             levels: vec![LevelShape::from_sizes(&[10, 10])],
         };
-        assert!(Leveling.plan(&shallow, full(0)).expect("job").drop_tombstones);
+        assert!(
+            Leveling
+                .plan(&shallow, full(0))
+                .expect("job")
+                .drop_tombstones
+        );
 
         let deep = TreeShape {
             levels: vec![

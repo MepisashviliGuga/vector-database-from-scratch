@@ -201,7 +201,11 @@ mod tests {
     #[test]
     fn binomial_handles_large_inputs_without_overflowing() {
         assert_eq!(binomial(60, 30), 118_264_581_564_861_424);
-        assert_eq!(binomial(100, 50), u64::MAX, "saturates rather than wrapping");
+        assert_eq!(
+            binomial(100, 50),
+            u64::MAX,
+            "saturates rather than wrapping"
+        );
     }
 
     #[test]

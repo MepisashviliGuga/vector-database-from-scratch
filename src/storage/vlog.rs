@@ -185,7 +185,10 @@ impl ValueLog {
         let len = u32::try_from(value.len()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("value of {} bytes exceeds the 4 GiB record limit", value.len()),
+                format!(
+                    "value of {} bytes exceeds the 4 GiB record limit",
+                    value.len()
+                ),
             )
         })?;
 

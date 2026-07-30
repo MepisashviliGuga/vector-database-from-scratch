@@ -136,8 +136,8 @@ impl HorizontalTiering {
     fn restart_for_more_data(&mut self) {
         self.horizon_bytes = self.horizon_bytes.saturating_mul(2).max(self.buffer_bytes);
         let levels = self.counters.len();
-        self.k = Self::initial_counter(levels, self.buffer_bytes, self.horizon_bytes)
-            .max(self.k + 1);
+        self.k =
+            Self::initial_counter(levels, self.buffer_bytes, self.horizon_bytes).max(self.k + 1);
         self.counters = vec![self.k; levels];
     }
 }
@@ -252,10 +252,17 @@ mod tests {
             scheme.note_flush();
             assert_eq!(scheme.next_compaction(&tree), None);
         }
-        assert_eq!(scheme.counters(), &[1, 3], "two flushes consumed two counts");
+        assert_eq!(
+            scheme.counters(),
+            &[1, 3],
+            "two flushes consumed two counts"
+        );
 
         scheme.note_flush();
-        assert_eq!(scheme.next_compaction(&tree).map(|r| r.first_level), Some(0));
+        assert_eq!(
+            scheme.next_compaction(&tree).map(|r| r.first_level),
+            Some(0)
+        );
         assert_eq!(
             scheme.counters(),
             &[2, 2],
@@ -265,7 +272,10 @@ mod tests {
         scheme.note_flush();
         assert_eq!(scheme.next_compaction(&tree), None);
         scheme.note_flush();
-        assert_eq!(scheme.next_compaction(&tree).map(|r| r.first_level), Some(0));
+        assert_eq!(
+            scheme.next_compaction(&tree).map(|r| r.first_level),
+            Some(0)
+        );
         assert_eq!(scheme.counters(), &[1, 1]);
     }
 
@@ -318,8 +328,14 @@ mod tests {
             .map(|pair| pair[1] - pair[0])
             .collect();
 
-        assert!(leveling_gaps.last() > leveling_gaps.first(), "leveling slows down");
-        assert!(tiering_gaps.last() < tiering_gaps.first(), "tiering speeds up");
+        assert!(
+            leveling_gaps.last() > leveling_gaps.first(),
+            "leveling slows down"
+        );
+        assert!(
+            tiering_gaps.last() < tiering_gaps.first(),
+            "tiering speeds up"
+        );
     }
 
     /// Algorithm 2 lines 1-3: `k` is the smallest integer with `N/B ≤ C(k+ℓ-1, ℓ)`.

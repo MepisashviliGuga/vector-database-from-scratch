@@ -86,9 +86,15 @@ fn parent() -> std::io::Result<()> {
     println!("reopening the database...");
     let tree = LsmTree::open(&dir, config())?;
     let stats = tree.stats();
-    println!("  runs on disk     {} in {} files", stats.run_count, stats.file_count);
+    println!(
+        "  runs on disk     {} in {} files",
+        stats.run_count, stats.file_count
+    );
     println!("  runs per level   {:?}", stats.runs_per_level);
-    println!("  memtable entries {} (replayed from the log)", stats.memtable_entries);
+    println!(
+        "  memtable entries {} (replayed from the log)",
+        stats.memtable_entries
+    );
 
     let mut live = 0usize;
     let mut deleted = 0usize;
@@ -126,7 +132,10 @@ fn parent() -> std::io::Result<()> {
     let iterated = tree.iter().count();
     let expected_live = ACKNOWLEDGED_WRITES - ACKNOWLEDGED_WRITES.div_ceil(10);
     println!("\n  iteration yields       {iterated} (expected {expected_live})");
-    assert_eq!(iterated, expected_live, "iteration disagrees with lookups after recovery");
+    assert_eq!(
+        iterated, expected_live,
+        "iteration disagrees with lookups after recovery"
+    );
 
     println!("\nPASSED — every acknowledged write survived an abrupt kill.");
     std::fs::remove_dir_all(&dir)?;

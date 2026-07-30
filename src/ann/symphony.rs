@@ -408,8 +408,7 @@ mod tests {
                 let codes = &index.vertices[vertex];
 
                 for entry in &codes.codes {
-                    let decomposed =
-                        index.estimate(entry, codes, &prepared, centre_distance);
+                    let decomposed = index.estimate(entry, codes, &prepared, centre_distance);
                     let direct = index
                         .quantizer
                         .estimate_squared_distance(&entry.code, &direct_query);
@@ -624,7 +623,11 @@ mod tests {
         let query = synthetic(1, dimension, 71);
 
         assert!(index.search(&query, 0, 16).is_empty(), "k = 0");
-        assert_eq!(index.search(&query, 1000, 16).len(), 50, "capped at the set");
+        assert_eq!(
+            index.search(&query, 1000, 16).len(),
+            50,
+            "capped at the set"
+        );
 
         // A query sitting exactly on a vertex: `‖q_r − c‖` is zero there.
         let on_vertex = index.graph.vector(3).to_vec();

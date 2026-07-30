@@ -193,7 +193,10 @@ mod tests {
 
         scheme.note_flush();
         assert_eq!(scheme.counters(), &[1, 0], "after the first flush");
-        assert_eq!(scheme.next_compaction(&tree).map(|r| r.first_level), Some(0));
+        assert_eq!(
+            scheme.next_compaction(&tree).map(|r| r.first_level),
+            Some(0)
+        );
         assert_eq!(scheme.counters(), &[0, 1], "C_1 resets, C_2 increments");
 
         scheme.note_flush();
@@ -201,7 +204,10 @@ mod tests {
 
         scheme.note_flush();
         assert_eq!(scheme.counters(), &[2, 1]);
-        assert_eq!(scheme.next_compaction(&tree).map(|r| r.first_level), Some(0));
+        assert_eq!(
+            scheme.next_compaction(&tree).map(|r| r.first_level),
+            Some(0)
+        );
         assert_eq!(scheme.counters(), &[0, 2]);
     }
 

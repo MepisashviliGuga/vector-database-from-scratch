@@ -224,8 +224,7 @@ mod tests {
         };
 
         for trial in 0..200 {
-            let candidates: Vec<ParetoPoint> =
-                (0..6).map(|i| point(i, next(), next())).collect();
+            let candidates: Vec<ParetoPoint> = (0..6).map(|i| point(i, next(), next())).collect();
             // A fixed table of pairwise distances, so the closure is consistent.
             let mut pairs = vec![HybridDistance::new(0.0, 0.0); 36];
             for i in 0..6 {
@@ -239,8 +238,7 @@ mod tests {
 
             // One candidate per layer, so the selection order is explicit and
             // the expected pruning set can be recomputed independently.
-            let layers: Vec<Vec<ParetoPoint>> =
-                candidates.iter().map(|c| vec![*c]).collect();
+            let layers: Vec<Vec<ParetoPoint>> = candidates.iter().map(|c| vec![*c]).collect();
             let edges = select_neighbours(&layers, 64, 0.0, pair);
 
             // Replay: walk the same order, tracking which are committed.

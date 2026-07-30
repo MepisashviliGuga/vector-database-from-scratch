@@ -45,5 +45,5 @@ pub use graph::{CandidateSource, DegConfig, DegIndex, EntryPolicy, PruningPolicy
 pub use hybrid::HybridSet;
 pub use interval::AlphaSet;
 pub use pareto::{dominates, frontier_layers, ParetoPoint};
-pub use pruning::{prunes_at, pruned_by, solve, HybridDistance};
+pub use pruning::{pruned_by, prunes_at, solve, HybridDistance};
 pub use select::{select_neighbours, DegEdge};

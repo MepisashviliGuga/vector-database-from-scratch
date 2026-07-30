@@ -38,7 +38,10 @@ fn main() -> std::io::Result<()> {
     // wide codes dominate the runtime. Selecting bit widths keeps a full run
     // tractable without silently skipping any.
     let bit_widths: Vec<u32> = match std::env::args().nth(3) {
-        Some(list) => list.split(',').filter_map(|b| b.trim().parse().ok()).collect(),
+        Some(list) => list
+            .split(',')
+            .filter_map(|b| b.trim().parse().ok())
+            .collect(),
         None => vec![1, 2, 3, 4, 5, 6, 7, 8],
     };
 
@@ -110,9 +113,7 @@ fn main() -> std::io::Result<()> {
             let mut ranked: Vec<(f32, usize)> = codes
                 .iter()
                 .enumerate()
-                .map(|(index, code)| {
-                    (quantizer.estimate_squared_distance(code, &prepared), index)
-                })
+                .map(|(index, code)| (quantizer.estimate_squared_distance(code, &prepared), index))
                 .collect();
             ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 

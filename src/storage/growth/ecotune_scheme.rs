@@ -65,7 +65,10 @@ impl EcoTune {
     ///
     /// If `top_capacity_bytes` is 0.
     pub fn new(config: EcoTuneConfig, top_capacity_bytes: u64) -> Self {
-        assert!(top_capacity_bytes > 0, "top level capacity must be positive");
+        assert!(
+            top_capacity_bytes > 0,
+            "top level capacity must be positive"
+        );
         let policy = EcoTunePolicy::solve(config);
         let schedule = policy
             .chosen_merges()
@@ -342,7 +345,10 @@ mod tests {
         for _ in 0..100 {
             scheme.note_flush();
             let mut actions = 0;
-            while scheme.next_compaction(&tree_with_main_runs(4096, 3)).is_some() {
+            while scheme
+                .next_compaction(&tree_with_main_runs(4096, 3))
+                .is_some()
+            {
                 actions += 1;
                 assert!(actions <= 1, "a flush produced {actions} actions");
             }
@@ -357,7 +363,10 @@ mod tests {
         let round = scheme.round_length();
         for _ in 0..500 {
             scheme.note_flush();
-            while scheme.next_compaction(&tree_with_main_runs(4096, 3)).is_some() {}
+            while scheme
+                .next_compaction(&tree_with_main_runs(4096, 3))
+                .is_some()
+            {}
             assert!(
                 scheme.position() <= round,
                 "position {} escaped the round length {round}",

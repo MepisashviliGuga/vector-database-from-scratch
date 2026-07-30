@@ -187,9 +187,18 @@ fn main() -> std::io::Result<()> {
         )?
     };
     println!("EcoTune calibration on this machine:");
-    println!("  T_w (flush interval)   {:.6} s", calibration.flush_interval_seconds);
-    println!("  T_c (rewrite one unit) {:.6} s", calibration.rewrite_seconds);
-    println!("  beta (query during ML) {:.3}", calibration.mlc_query_factor);
+    println!(
+        "  T_w (flush interval)   {:.6} s",
+        calibration.flush_interval_seconds
+    );
+    println!(
+        "  T_c (rewrite one unit) {:.6} s",
+        calibration.rewrite_seconds
+    );
+    println!(
+        "  beta (query during ML) {:.3}",
+        calibration.mlc_query_factor
+    );
     println!(
         "  NOTE: beta here is the share of wall-clock time compaction occupies, not\n\
          \x20       the paper's contended-thread measurement. This engine compacts\n\
@@ -214,7 +223,10 @@ fn main() -> std::io::Result<()> {
     // ---- Sweep 2: merge policy. ----
     println!("\n[2] Merge policy (growth=vertical, uniform keys, 100 B values)");
     print_header();
-    for merge in [MergeKind::Leveling, MergeKind::Tiering { runs_per_level: 4 }] {
+    for merge in [
+        MergeKind::Leveling,
+        MergeKind::Tiering { runs_per_level: 4 },
+    ] {
         runner.run(
             "merge",
             vertical(),
@@ -232,7 +244,10 @@ fn main() -> std::io::Result<()> {
         KeyDistribution::Uniform,
         KeyDistribution::Zipfian { theta: 0.99 },
     ] {
-        for merge in [MergeKind::Leveling, MergeKind::Tiering { runs_per_level: 4 }] {
+        for merge in [
+            MergeKind::Leveling,
+            MergeKind::Tiering { runs_per_level: 4 },
+        ] {
             runner.run(
                 "dist",
                 vertical(),
@@ -263,7 +278,10 @@ fn main() -> std::io::Result<()> {
         (vertical(), MergeKind::Leveling),
         (vertical(), MergeKind::Tiering { runs_per_level: 4 }),
         (vertiorizon(), MergeKind::Leveling),
-        (ecotune(calibration), MergeKind::Tiering { runs_per_level: 8 }),
+        (
+            ecotune(calibration),
+            MergeKind::Tiering { runs_per_level: 8 },
+        ),
     ] {
         runner.run(
             "scan",

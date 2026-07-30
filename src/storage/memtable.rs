@@ -291,7 +291,10 @@ mod tests {
         assert_eq!(keys, vec![k("alpha"), k("bravo"), k("charlie"), k("delta")]);
 
         let values: Vec<&Value> = table.iter().map(|(_, value)| value).collect();
-        assert!(values[1].is_tombstone(), "tombstones must survive iteration");
+        assert!(
+            values[1].is_tombstone(),
+            "tombstones must survive iteration"
+        );
     }
 
     #[test]

@@ -131,10 +131,7 @@ fn read_records(path: impl AsRef<Path>, decode: fn(&[u8]) -> f32) -> io::Result<
 
         let mut payload = vec![0u8; declared * 4];
         if fill(&mut reader, &mut payload)? < payload.len() {
-            return Err(malformed(&format!(
-                "{} ends mid-vector",
-                path.display()
-            )));
+            return Err(malformed(&format!("{} ends mid-vector", path.display())));
         }
         data.extend(payload.chunks_exact(4).map(decode));
     }

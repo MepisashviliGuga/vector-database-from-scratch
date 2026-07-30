@@ -94,9 +94,9 @@ impl Manifest {
             Err(error) => return Err(error),
         };
 
-        let (body, checksum_line) = contents.rsplit_once("crc32 ").ok_or_else(|| {
-            malformed("manifest has no checksum line; it was probably truncated")
-        })?;
+        let (body, checksum_line) = contents
+            .rsplit_once("crc32 ")
+            .ok_or_else(|| malformed("manifest has no checksum line; it was probably truncated"))?;
 
         let expected = u32::from_str_radix(checksum_line.trim(), 16)
             .map_err(|_| malformed("manifest checksum is not a hex number"))?;
@@ -269,7 +269,10 @@ mod tests {
     #[test]
     fn an_empty_manifest_round_trips() {
         let dir = TempDir::new("empty");
-        let manifest = Manifest { runs: Vec::new(), next_sequence: 1 };
+        let manifest = Manifest {
+            runs: Vec::new(),
+            next_sequence: 1,
+        };
         manifest.store(&dir.path).expect("store");
 
         let loaded = Manifest::load(&dir.path).expect("load").expect("present");
@@ -307,7 +310,10 @@ mod tests {
         let contents = std::fs::read_to_string(&path).expect("read");
         // Change a run's level without fixing the checksum.
         let tampered = contents.replace("run 1 5 ", "run 3 5 ");
-        assert_ne!(tampered, contents, "the tamper must actually change something");
+        assert_ne!(
+            tampered, contents,
+            "the tamper must actually change something"
+        );
         std::fs::write(&path, tampered).expect("write");
 
         let error = Manifest::load(&dir.path).expect_err("must reject");

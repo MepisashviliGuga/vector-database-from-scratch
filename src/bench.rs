@@ -294,8 +294,7 @@ pub fn run_benchmark(
         blocks_per_point_read: (point_reads > 0)
             .then(|| blocks_in_point_reads as f64 / point_reads as f64),
         blocks_per_scan: (scans > 0).then(|| blocks_in_scans as f64 / scans as f64),
-        space_amplification: (live_bytes > 0)
-            .then(|| stats.disk_bytes as f64 / live_bytes as f64),
+        space_amplification: (live_bytes > 0).then(|| stats.disk_bytes as f64 / live_bytes as f64),
 
         run_count: stats.run_count,
         file_count: stats.file_count,
@@ -350,11 +349,11 @@ pub fn calibrate(dir: &Path, config: LsmConfig, spec: WorkloadSpec) -> io::Resul
 
     // Seconds per byte of compaction output, scaled to one buffer's worth.
     let rewrite_seconds = if stats.compaction_bytes_written > 0 {
-        let compaction_share = stats.compaction_bytes_written as f64
-            / stats.sstable_bytes_written.max(1) as f64;
+        let compaction_share =
+            stats.compaction_bytes_written as f64 / stats.sstable_bytes_written.max(1) as f64;
         let compaction_seconds = elapsed * compaction_share;
-        let buffers = stats.compaction_bytes_written as f64
-            / config.memtable_threshold_bytes.max(1) as f64;
+        let buffers =
+            stats.compaction_bytes_written as f64 / config.memtable_threshold_bytes.max(1) as f64;
         compaction_seconds / buffers.max(1.0)
     } else {
         0.0
@@ -549,7 +548,10 @@ mod tests {
             space >= 1.0,
             "disk cannot hold less than the live data: {space}"
         );
-        assert!(space < 20.0, "space amplification of {space} is implausible");
+        assert!(
+            space < 20.0,
+            "space amplification of {space} is implausible"
+        );
     }
 
     /// Read amplification must come from the block counters, and a workload with

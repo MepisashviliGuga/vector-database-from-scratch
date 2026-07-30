@@ -261,7 +261,9 @@ mod tests {
             vec![4, 2, 3, 1]
         );
         assert!(
-            results.windows(2).all(|pair| pair[0].distance <= pair[1].distance),
+            results
+                .windows(2)
+                .all(|pair| pair[0].distance <= pair[1].distance),
             "distances must ascend: {results:?}"
         );
     }
@@ -292,8 +294,16 @@ mod tests {
             index.add(id, &[1.0, 1.0]);
         }
 
-        let first: Vec<u64> = index.search(&[0.0, 0.0], 3).into_iter().map(|n| n.id).collect();
-        let second: Vec<u64> = index.search(&[0.0, 0.0], 3).into_iter().map(|n| n.id).collect();
+        let first: Vec<u64> = index
+            .search(&[0.0, 0.0], 3)
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        let second: Vec<u64> = index
+            .search(&[0.0, 0.0], 3)
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
         assert_eq!(first, second);
         assert_eq!(first, vec![1, 3, 5], "ties resolve by ascending id");
     }
@@ -326,7 +336,10 @@ mod tests {
         for (id, vector) in vectors.iter().enumerate() {
             let nearest = index.search(vector, 1);
             assert_eq!(nearest[0].id, id as u64);
-            assert!(nearest[0].distance < 1e-9, "a vector is zero distance from itself");
+            assert!(
+                nearest[0].distance < 1e-9,
+                "a vector is zero distance from itself"
+            );
         }
     }
 

@@ -199,7 +199,10 @@ impl SSTableWriter {
             io::Error::new(io::ErrorKind::InvalidInput, "key too large for an SSTable")
         })?;
         let value_len: u32 = value_bytes.len().try_into().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "value too large for an SSTable")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "value too large for an SSTable",
+            )
         })?;
 
         if self.block_first_key.is_none() {
@@ -284,10 +287,8 @@ impl SSTableWriter {
         // and a filter that omitted them would let the search fall through to an
         // older run and resurrect the key.
         let (bloom_offset, bloom_length) = if self.bloom_false_positive_rate > 0.0 {
-            let mut filter = BloomFilter::with_capacity(
-                self.key_hashes.len(),
-                self.bloom_false_positive_rate,
-            );
+            let mut filter =
+                BloomFilter::with_capacity(self.key_hashes.len(), self.bloom_false_positive_rate);
             for &hash in &self.key_hashes {
                 filter.insert_hash(hash);
             }
@@ -438,8 +439,7 @@ impl SSTable {
         // The filter is loaded once and held for the table's lifetime — that
         // resident cost is the whole point, since it buys disk reads back.
         let bloom = if footer.bloom_length > 0 {
-            let bloom_bytes =
-                read_checked_block(&file, footer.bloom_offset, footer.bloom_length)?;
+            let bloom_bytes = read_checked_block(&file, footer.bloom_offset, footer.bloom_length)?;
             Some(BloomFilter::decode(&bloom_bytes)?)
         } else {
             None
@@ -701,7 +701,8 @@ fn decode_block(bytes: &[u8]) -> io::Result<Vec<(Key, Value)>> {
             return Err(malformed("truncated entry header"));
         }
         let tag = bytes[cursor];
-        let key_len = u32::from_le_bytes(bytes[cursor + 1..cursor + 5].try_into().expect("4 bytes"));
+        let key_len =
+            u32::from_le_bytes(bytes[cursor + 1..cursor + 5].try_into().expect("4 bytes"));
         let value_len =
             u32::from_le_bytes(bytes[cursor + 5..cursor + 9].try_into().expect("4 bytes"));
         cursor += 9;
@@ -745,8 +746,11 @@ fn decode_index(bytes: &[u8]) -> io::Result<Vec<IndexEntry>> {
         }
         let first_key = bytes[cursor..key_end].to_vec();
         let offset = u64::from_le_bytes(bytes[key_end..key_end + 8].try_into().expect("8 bytes"));
-        let length =
-            u32::from_le_bytes(bytes[key_end + 8..key_end + 12].try_into().expect("4 bytes"));
+        let length = u32::from_le_bytes(
+            bytes[key_end + 8..key_end + 12]
+                .try_into()
+                .expect("4 bytes"),
+        );
         cursor = key_end + 12;
 
         entries.push(IndexEntry {
@@ -903,7 +907,12 @@ mod tests {
         let path = dir.file("test.sst");
 
         let entries: Vec<(Key, Value)> = (0..500)
-            .map(|i| (numbered_key(i), Value::Put(format!("value-{i}").into_bytes())))
+            .map(|i| {
+                (
+                    numbered_key(i),
+                    Value::Put(format!("value-{i}").into_bytes()),
+                )
+            })
             .collect();
         // A small block size forces many blocks, exercising the index search.
         let meta = write_table(&path, &entries, 256);
@@ -1180,7 +1189,8 @@ mod tests {
         // out and only the filter can prevent a block read. Probing keys outside
         // the table's range instead would make this test pass with no filter at
         // all.
-        let entries: Vec<(Key, Value)> = (0..2000).map(|i| (numbered_key(i * 2), put("v"))).collect();
+        let entries: Vec<(Key, Value)> =
+            (0..2000).map(|i| (numbered_key(i * 2), put("v"))).collect();
         write_table(&path, &entries, 512);
 
         let table = SSTable::open(&path).expect("open");

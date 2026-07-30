@@ -121,7 +121,9 @@ impl IvfIndex {
                 .centroid(cluster)
                 .expect("assign returned a valid cluster");
             lists[cluster].ids.push(index as u32);
-            lists[cluster].codes.push(quantizer.encode(vector, centroid));
+            lists[cluster]
+                .codes
+                .push(quantizer.encode(vector, centroid));
         }
 
         Self {
@@ -507,7 +509,9 @@ mod tests {
 
         let results = index.search(query, 20, 8);
         assert!(
-            results.windows(2).all(|pair| pair[0].distance <= pair[1].distance),
+            results
+                .windows(2)
+                .all(|pair| pair[0].distance <= pair[1].distance),
             "results must ascend by estimate: {results:?}"
         );
     }
