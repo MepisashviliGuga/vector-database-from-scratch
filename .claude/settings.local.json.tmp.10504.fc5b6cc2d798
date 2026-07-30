@@ -65,7 +65,8 @@
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib deg 2>&1 | Select-Object -Last 20)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --lib --all-targets -- -D warnings 2>&1 | Select-Object -Last 15)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --lib --all-targets -- -D warnings 2>&1 | Select-Object -Last 12)",
-      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib -q 2>&1 | Select-Object -Last 4)"
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib -q 2>&1 | Select-Object -Last 4)",
+      "PowerShell(git *)"
     ]
   }
 }

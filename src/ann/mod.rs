@@ -17,6 +17,7 @@
 //! within the engine it is always squared.
 
 pub mod brute_force;
+pub mod deg;
 pub mod fvecs;
 pub mod graph;
 pub mod ivf;
@@ -26,6 +27,7 @@ pub mod rotation;
 pub mod symphony;
 
 pub use brute_force::{BruteForceIndex, Neighbor};
+pub use deg::{AlphaSet, HybridDistance};
 pub use graph::{GraphConfig, GraphIndex};
 pub use ivf::{IvfConfig, IvfIndex};
 pub use kmeans::KMeans;
