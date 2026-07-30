@@ -33,7 +33,11 @@
 //! that as future work.
 
 pub mod interval;
+pub mod pareto;
 pub mod pruning;
+pub mod select;
 
 pub use interval::AlphaSet;
+pub use pareto::{dominates, frontier_layers, ParetoPoint};
 pub use pruning::{prunes_at, pruned_by, solve, HybridDistance};
+pub use select::{select_neighbours, DegEdge};

@@ -66,7 +66,18 @@
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --lib --all-targets -- -D warnings 2>&1 | Select-Object -Last 15)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe clippy --lib --all-targets -- -D warnings 2>&1 | Select-Object -Last 12)",
       "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib -q 2>&1 | Select-Object -Last 4)",
-      "PowerShell(git *)"
+      "PowerShell(git *)",
+      "Read(//c/Users/Guga/**)",
+      "Bash(node \"C:/Users/Guga/AppData/Local/Temp/claude/C--Users-Guga-OneDrive---Kutaisi-International-University-Desktop-Vector-Database-Built-From-Scratch/3fe90b9a-9f6c-4538-9607-761c0a8b1d6e/scratchpad/doctor-config.js\" \"C:\\\\\\\\Users\\\\\\\\Guga\\\\\\\\OneDrive - Kutaisi International University\\\\\\\\Desktop\\\\\\\\Vector Database Built From Scratch\")",
+      "Bash(node --input-type=module -e 'import\\(\"fs\"\\)')",
+      "Bash(node -e ' *)",
+      "Bash(node --experimental-default-type=commonjs \"C:/Users/Guga/AppData/Local/Temp/claude/C--Users-Guga-OneDrive---Kutaisi-International-University-Desktop-Vector-Database-Built-From-Scratch/3fe90b9a-9f6c-4538-9607-761c0a8b1d6e/scratchpad/doctor-scan.js\")",
+      "Bash(node \"C:/Users/Guga/AppData/Local/Temp/claude/C--Users-Guga-OneDrive---Kutaisi-International-University-Desktop-Vector-Database-Built-From-Scratch/3fe90b9a-9f6c-4538-9607-761c0a8b1d6e/scratchpad/doctor-scan.js\")",
+      "Bash(node \"C:/Users/Guga/AppData/Local/Temp/claude/C--Users-Guga-OneDrive---Kutaisi-International-University-Desktop-Vector-Database-Built-From-Scratch/3fe90b9a-9f6c-4538-9607-761c0a8b1d6e/scratchpad/doctor-scan2.js\")",
+      "Bash(curl -fsS --max-time 20 \"https://downloads.claude.ai/claude-code-releases/latest\")",
+      "Bash(node \"C:/Users/Guga/AppData/Local/Temp/claude/C--Users-Guga-OneDrive---Kutaisi-International-University-Desktop-Vector-Database-Built-From-Scratch/3fe90b9a-9f6c-4538-9607-761c0a8b1d6e/scratchpad/doctor-apply.js\")",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib deg:: 2>&1 | Select-Object -Last 25)",
+      "PowerShell(C:\\\\Users\\\\Guga\\\\.cargo\\\\bin\\\\cargo.exe test --lib deg::select 2>&1 | Select-Object -Last 25)"
     ]
   }
 }
