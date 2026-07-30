@@ -259,4 +259,4 @@ misreading of the paper. No reported result comes from running it.
 
 ## Licence
 
-Not yet chosen.
+MIT — see [`LICENSE`](LICENSE).

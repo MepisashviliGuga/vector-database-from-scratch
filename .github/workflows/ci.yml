@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Every reported figure comes from a release build; failing the lint gate in CI
+  # is what keeps the README's "clippy clean" claim honest.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup component add clippy rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The unit tests are the whole correctness story: paper algorithms pinned
+      # against their published worked examples, crash recovery, and the ANN
+      # oracle. They need no dataset — the ones that do live in `examples/`.
+      - name: Tests
+        run: cargo test --all-targets
+
+      - name: Doc tests
+        run: cargo test --doc
+
+  build-examples:
+    name: examples build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      # The examples are how every reported number is reproduced, so they must
+      # keep compiling even though CI has no dataset to run them against.
+      - name: Build examples
+        run: cargo build --release --examples

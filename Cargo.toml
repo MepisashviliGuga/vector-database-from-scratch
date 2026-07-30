@@ -3,6 +3,11 @@ name = "vectordb"
 version = "0.1.0"
 edition = "2021"
 description = "A vector database built from scratch: LSM-tree storage engine + quantization/graph ANN index"
+license = "MIT"
+repository = "https://github.com/MepisashviliGuga/vector-database-from-scratch"
+readme = "README.md"
+keywords = ["vector-database", "lsm-tree", "ann", "quantization", "rabitq"]
+categories = ["database-implementations", "algorithms"]
 
 [lib]
 name = "vectordb"
