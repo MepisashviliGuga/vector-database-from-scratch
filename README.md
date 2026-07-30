@@ -1,5 +1,8 @@
 # A vector database, built from scratch
 
+[![CI](https://github.com/MepisashviliGuga/vector-database-from-scratch/actions/workflows/ci.yml/badge.svg)](https://github.com/MepisashviliGuga/vector-database-from-scratch/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A durable LSM-tree storage engine and a modern approximate-nearest-neighbour
 index, both written from the papers in Rust, with no embedded database and no ANN
 library underneath.
