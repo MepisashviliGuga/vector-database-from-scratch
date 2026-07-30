@@ -232,7 +232,24 @@ impl GrowthKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeKind {
     Leveling,
-    Tiering { runs_per_level: usize },
+    Tiering {
+        runs_per_level: usize,
+    },
+    /// The Fluid LSM-tree dial — paper 06 §2.
+    ///
+    /// `policy` is `K`, the runs a level may hold: `1` is leveling,
+    /// `size_ratio` is tiering, and between them is a hybrid. This is what
+    /// [`Lerp`](super::compaction::Lerp) tunes.
+    ///
+    /// `K` is uniform across levels, which is not a shortcut but the case §5.2.1
+    /// describes: with the same bloom bits per key at every level — what this
+    /// engine allocates — every level has the same read/write cost ratio and so
+    /// the same optimal policy. Per-level policies only pay off under Monkey
+    /// allocation, which this engine does not implement.
+    Fluid {
+        policy: usize,
+        size_ratio: usize,
+    },
 }
 
 impl MergeKind {
@@ -241,6 +258,7 @@ impl MergeKind {
         match self {
             Self::Leveling => "leveling",
             Self::Tiering { .. } => "tiering",
+            Self::Fluid { .. } => "fluid",
         }
     }
 
@@ -248,6 +266,9 @@ impl MergeKind {
         match *self {
             Self::Leveling => Box::new(Leveling),
             Self::Tiering { runs_per_level } => Box::new(Tiering::new(runs_per_level)),
+            Self::Fluid { policy, size_ratio } => {
+                Box::new(super::compaction::Fluid::uniform(policy, size_ratio))
+            }
         }
     }
 }
@@ -1030,6 +1051,44 @@ impl LsmTree {
     }
 
     /// Name of the live growth scheme, for benchmark output.
+    /// Change the merge policy on a live tree — RusKey's mission boundary.
+    ///
+    /// Returns the policy that was replaced, so a caller can report the
+    /// transition or put it back.
+    ///
+    /// # What this costs, and why it is not the paper's FLSM-tree
+    ///
+    /// Paper 06's second contribution (§4) is a tree that makes this transition
+    /// *cheap*. Their problem is that a level's runs are sized `C_i / K_i`, so
+    /// changing `K_i` means resizing every run in the level and remapping its
+    /// blocks — expensive enough to outweigh the benefit of retuning at all.
+    /// FLSM-tree avoids it by allowing variously sized runs in a level, sealing
+    /// the existing ones and opening a smaller active run.
+    ///
+    /// **This engine does not have that problem, so it does not need that
+    /// solution.** Runs here are whole SSTable files with no per-level size
+    /// contract; `K` changes only *when* the growth scheme fires a compaction
+    /// and *whether* the target level is rewritten or appended to. No existing
+    /// file is touched by the switch, so the transition is O(1) — a pointer
+    /// swap — and the data reorganises lazily through normal compaction.
+    ///
+    /// That is a consequence of a design decision made long before this paper
+    /// was read, not a reproduction of it, and it is labelled as such rather
+    /// than claimed as an implementation of §4. What it does mean is that the
+    /// transition cost §4 exists to eliminate cannot be measured here, because
+    /// it was never incurred.
+    pub fn set_merge_policy(&mut self, kind: MergeKind) -> MergeKind {
+        let previous = self.config.merge;
+        self.config.merge = kind;
+        self.merge = kind.build();
+        previous
+    }
+
+    /// The merge policy currently in force.
+    pub fn merge_kind(&self) -> MergeKind {
+        self.config.merge
+    }
+
     pub fn growth_name(&self) -> &'static str {
         self.growth.name()
     }
@@ -2300,6 +2359,249 @@ mod tests {
 
         assert_eq!(tree.levels[0].len(), 1);
         assert_eq!(tree.get(b"a").expect("get"), Some(v("1")));
+    }
+
+    // ---- the Fluid dial, and retuning a live tree ------------------------
+
+    /// The same tree as [`test_config`], with the dial at `policy`.
+    ///
+    /// Deliberately derived from the configuration the leveling-vs-tiering tests
+    /// already use, so the dial is exercised in a setup known to expose the
+    /// difference between the two behaviours it interpolates.
+    fn fluid_config(policy: usize) -> LsmConfig {
+        LsmConfig {
+            merge: MergeKind::Fluid {
+                policy,
+                size_ratio: 4,
+            },
+            ..test_config()
+        }
+    }
+
+    /// Write `count` keys in a **scattered** order.
+    ///
+    /// The order is what makes these fixtures mean anything. Writing keys
+    /// ascending gives every flushed run a disjoint key range, and leveling then
+    /// has nothing to rewrite — so leveling and tiering behave identically and
+    /// every comparison below passes or fails for the wrong reason. This project
+    /// already recorded that lesson once (`results/README.md`: leveling pays for
+    /// overlap, not for volume) and these tests initially repeated it.
+    ///
+    /// `i * 397 mod count` is a bijection whenever 397 is coprime to `count`, so
+    /// every key is still written exactly once — the runs just overlap.
+    fn fill(tree: &mut LsmTree, count: u32) {
+        // 397 is prime, so it is coprime to `count` unless it divides it.
+        assert!(
+            count > 0 && !count.is_multiple_of(397),
+            "stride 397 is not coprime to {count}, so this would not be a permutation"
+        );
+        for i in 0..count {
+            let key = (i as u64 * 397 % u64::from(count)) as u32;
+            tree.put(k(&format!("key{key:05}")), vec![(key % 251) as u8; 128])
+                .expect("put");
+        }
+    }
+
+    fn check(tree: &LsmTree, count: u32) {
+        for i in 0..count {
+            assert_eq!(
+                tree.get(format!("key{i:05}").as_bytes()).expect("get"),
+                Some(vec![(i % 251) as u8; 128]),
+                "key{i:05}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fluid_tree_at_k_one_preserves_its_contents() {
+        let dir = TempDir::new("fluid-k1");
+        let mut tree = LsmTree::open(&dir.path, fluid_config(1)).expect("open");
+        fill(&mut tree, 400);
+        tree.flush().expect("flush");
+        tree.compact_until_quiet().expect("compact");
+        check(&tree, 400);
+    }
+
+    #[test]
+    fn a_fluid_tree_at_k_t_preserves_its_contents() {
+        let dir = TempDir::new("fluid-kt");
+        let mut tree = LsmTree::open(&dir.path, fluid_config(4)).expect("open");
+        fill(&mut tree, 400);
+        tree.flush().expect("flush");
+        tree.compact_until_quiet().expect("compact");
+        check(&tree, 400);
+    }
+
+    /// The same 3000 keys the leveling-vs-tiering tests use, scrambled.
+    fn scattered() -> impl Iterator<Item = usize> {
+        (0..3000).map(|i| (i * 7919) % 3000)
+    }
+
+    #[test]
+    fn the_dial_trades_write_amplification_for_laziness() {
+        // The trade the paper is about, on a real tree: turning K up should
+        // write less.
+        //
+        // Measured after a flush and *not* after `compact_until_quiet`. Driving
+        // both configurations to quiescence erases the difference, because the
+        // growth scheme decides when to stop and it does not consult K — an
+        // earlier version of this test did exactly that and reported the dial as
+        // inert.
+        let aggressive = amplification(fluid_config(1), "fluid-amp-1", scattered());
+        let lazy = amplification(fluid_config(4), "fluid-amp-4", scattered());
+        assert!(
+            lazy < aggressive,
+            "K=4 wrote {lazy:.2}x against K=1's {aggressive:.2}x — the dial is inert"
+        );
+    }
+
+    #[test]
+    fn the_dials_endpoints_cost_exactly_what_the_dedicated_policies_cost() {
+        // The strongest anchor available: not merely that the dial moves, but
+        // that its endpoints are indistinguishable from the policies they
+        // replace, measured end to end on a real tree rather than by comparing
+        // plans.
+        let levelled = amplification(test_config(), "fluid-eq-leveling", scattered());
+        let dialled_down = amplification(fluid_config(1), "fluid-eq-k1", scattered());
+        assert!(
+            (levelled - dialled_down).abs() < 1e-9,
+            "K=1 cost {dialled_down:.4}x, leveling cost {levelled:.4}x"
+        );
+
+        let tiered = amplification(tiering_config(), "fluid-eq-tiering", scattered());
+        let dialled_up = amplification(fluid_config(4), "fluid-eq-k4", scattered());
+        assert!(
+            (tiered - dialled_up).abs() < 1e-9,
+            "K=4 cost {dialled_up:.4}x, tiering cost {tiered:.4}x"
+        );
+    }
+
+    #[test]
+    fn intermediate_settings_sit_between_the_endpoints() {
+        // What a dial buys over a switch: policies that are neither.
+        let mut costs = Vec::new();
+        for policy in 1..=4 {
+            costs.push(amplification(
+                fluid_config(policy),
+                &format!("fluid-mid-{policy}"),
+                scattered(),
+            ));
+        }
+        assert!(
+            costs[0] >= costs[3],
+            "K=1 should cost at least as much as K=4: {costs:?}"
+        );
+        assert!(
+            costs.windows(2).all(|pair| pair[1] <= pair[0] + 1e-9),
+            "amplification should fall monotonically as K rises: {costs:?}"
+        );
+    }
+
+    #[test]
+    fn retuning_a_live_tree_preserves_every_key() {
+        // RusKey's mission boundary. Data written under one policy must survive
+        // being compacted under another — the check that a policy swap is not
+        // quietly destructive.
+        let dir = TempDir::new("fluid-retune");
+        let mut tree = LsmTree::open(&dir.path, fluid_config(1)).expect("open");
+
+        fill(&mut tree, 300);
+        tree.flush().expect("flush");
+
+        let previous = tree.set_merge_policy(MergeKind::Fluid {
+            policy: 4,
+            size_ratio: 4,
+        });
+        assert_eq!(
+            previous,
+            MergeKind::Fluid {
+                policy: 1,
+                size_ratio: 4
+            }
+        );
+        assert_eq!(
+            tree.merge_kind(),
+            MergeKind::Fluid {
+                policy: 4,
+                size_ratio: 4
+            }
+        );
+
+        // More writes under the new policy, then back again.
+        for i in 300..600u32 {
+            tree.put(k(&format!("key{i:05}")), vec![(i % 251) as u8; 128])
+                .expect("put");
+        }
+        tree.set_merge_policy(MergeKind::Fluid {
+            policy: 1,
+            size_ratio: 4,
+        });
+        tree.flush().expect("flush");
+        tree.compact_until_quiet().expect("compact");
+
+        check(&tree, 600);
+    }
+
+    #[test]
+    fn retuning_survives_a_reopen() {
+        // The policy lives in the config, not on disk, so a reopen uses whatever
+        // the caller supplies — and the data must not care which.
+        let dir = TempDir::new("fluid-retune-reopen");
+        {
+            let mut tree = LsmTree::open(&dir.path, fluid_config(4)).expect("open");
+            fill(&mut tree, 300);
+            tree.set_merge_policy(MergeKind::Fluid {
+                policy: 1,
+                size_ratio: 4,
+            });
+            tree.flush().expect("flush");
+            tree.compact_until_quiet().expect("compact");
+            tree.sync().expect("sync");
+        }
+        let tree = LsmTree::open(&dir.path, fluid_config(2)).expect("reopen");
+        check(&tree, 300);
+    }
+
+    #[test]
+    fn deletes_survive_a_policy_change() {
+        // The dangerous case. Tombstone dropping differs between the two
+        // behaviours the dial selects, so a key deleted under one policy must
+        // stay deleted after compaction under the other.
+        let dir = TempDir::new("fluid-delete");
+        let mut tree = LsmTree::open(&dir.path, fluid_config(4)).expect("open");
+        fill(&mut tree, 200);
+        tree.flush().expect("flush");
+
+        for i in (0..200u32).step_by(2) {
+            tree.delete(k(&format!("key{i:05}"))).expect("delete");
+        }
+        tree.set_merge_policy(MergeKind::Fluid {
+            policy: 1,
+            size_ratio: 4,
+        });
+        tree.flush().expect("flush");
+        tree.compact_until_quiet().expect("compact");
+
+        for i in 0..200u32 {
+            let found = tree.get(format!("key{i:05}").as_bytes()).expect("get");
+            if i % 2 == 0 {
+                assert_eq!(found, None, "key{i:05} was deleted and came back");
+            } else {
+                assert!(found.is_some(), "key{i:05} was not deleted but is gone");
+            }
+        }
+    }
+
+    #[test]
+    fn the_merge_kind_reports_its_name() {
+        assert_eq!(
+            MergeKind::Fluid {
+                policy: 3,
+                size_ratio: 10
+            }
+            .name(),
+            "fluid"
+        );
     }
 
     // ---- key–value separation -------------------------------------------
