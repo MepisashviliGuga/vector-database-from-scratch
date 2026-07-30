@@ -771,7 +771,7 @@ fn malformed(reason: &str) -> io::Error {
 /// Positioned reads keep [`SSTable::get`] on `&self`. Unix and Windows spell
 /// this differently and neither guarantees a full read in one call, hence the
 /// loop.
-fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+pub(crate) fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     #[cfg(unix)]
     use std::os::unix::fs::FileExt;
     #[cfg(windows)]

@@ -15,6 +15,7 @@ pub mod memtable;
 pub mod merge;
 pub mod shape;
 pub mod sstable;
+pub mod vlog;
 pub mod wal;
 
 pub use bloom::BloomFilter;
@@ -29,6 +30,7 @@ pub use manifest::Manifest;
 pub use memtable::{MemTable, Value};
 pub use merge::MergeIterator;
 pub use sstable::{SSTable, SSTableMeta, SSTableWriter};
+pub use vlog::{ValueLog, ValuePointer};
 pub use wal::{Replay, SyncPolicy, Wal};
 
 /// Keys are opaque byte strings, ordered lexicographically. The engine never
