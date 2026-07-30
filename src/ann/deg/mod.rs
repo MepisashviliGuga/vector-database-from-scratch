@@ -33,6 +33,7 @@
 //! that as future work.
 
 pub mod gps;
+pub mod graph;
 pub mod hybrid;
 pub mod interval;
 pub mod pareto;
@@ -40,6 +41,7 @@ pub mod pruning;
 pub mod select;
 
 pub use gps::gps;
+pub use graph::{DegConfig, DegIndex, PruningPolicy};
 pub use hybrid::HybridSet;
 pub use interval::AlphaSet;
 pub use pareto::{dominates, frontier_layers, ParetoPoint};
