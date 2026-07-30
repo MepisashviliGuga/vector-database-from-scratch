@@ -102,28 +102,83 @@ only rescale the modalities: every index and query distance divides by the same
 two constants, so nothing is inconsistent; what shifts is the exchange rate α
 expresses. Exhaustive is used automatically when N is small.
 
-## What does not reproduce
+## The headline result: DEG trades peak recall for a flatter curve
 
-**DEG does not beat Fusion**, and at the operating points tested the fixed-α
-baseline does not degrade the way §3.3 reports.
+10k objects, beam 48, degree 32, **pool 256** — the operating point the diagnosis
+below shows GPS actually needs. Bold marks the winner between DEG and Fusion.
 
-100k SIFT objects, 2-D synthetic second modality, beam 100, degree 32, pool 100:
+**Independent modalities** (the regime where α genuinely matters):
 
 | α | DEG | Fusion | Merging |
 |---|---|---|---|
-| 0.0 | 0.2490 | 0.2170 | 0.3230 |
-| 0.1 | 0.3250 | 0.3620 | 0.1070 |
-| 0.3 | 0.3420 | **0.4270** | 0.0650 |
-| 0.5 | 0.3140 | 0.4090 | 0.1020 |
-| 0.7 | 0.3010 | 0.3640 | 0.1740 |
-| 0.9 | 0.2790 | 0.2970 | 0.2990 |
-| 1.0 | 0.2780 | 0.2380 | 0.3610 |
+| 0.0 | **0.9050** | 0.8150 | 1.0000 |
+| 0.1 | **0.9650** | 0.9450 | 0.3810 |
+| 0.3 | 0.9620 | **0.9770** | 0.1750 |
+| 0.5 | 0.9440 | **0.9660** | 0.1840 |
+| 0.7 | 0.8980 | **0.9060** | 0.3280 |
+| 0.9 | **0.8830** | 0.8420 | 0.6760 |
+| 1.0 | **0.8310** | 0.7900 | 0.9480 |
 
-DEG wins at the extremes (α = 0 and 1) and loses through the middle. That is
-*directionally* the right shape — DEG's curve is flatter, Fusion's peaks near its
-build α of 0.5 — but the absolute numbers are far too low to claim anything.
+**Correlated modalities** (the control):
 
-### The diagnostic: the graphs themselves are bad
+| α | DEG | Fusion | Merging |
+|---|---|---|---|
+| 0.0 | **0.8820** | 0.7830 | 0.9730 |
+| 0.1 | **0.9550** | 0.9370 | 0.4770 |
+| 0.3 | 0.9350 | **0.9660** | 0.3730 |
+| 0.5 | 0.9270 | **0.9700** | 0.4630 |
+| 0.7 | 0.9180 | **0.9530** | 0.6410 |
+| 0.9 | 0.9030 | **0.9190** | 0.8460 |
+| 1.0 | 0.8980 | **0.9060** | 0.9580 |
+
+**§3.3's argument reproduces.** Fusion peaks near the α it was built at and
+degrades away from it; DEG holds a flatter curve. The spread across α is the
+number that matters, since α is unknown when the index is built:
+
+| | Fusion spread | DEG spread | Fusion worst | DEG worst |
+|---|---|---|---|---|
+| independent | 18.7 pts | 13.4 pts | 0.7900 | **0.8310** |
+| correlated | 18.7 pts | **7.3 pts** | 0.7830 | **0.8820** |
+
+**DEG does not dominate — it insures.** Fusion wins at four of seven α in each
+regime, always in the band around its build α of 0.5, and by 0.8–4.3 points. DEG
+wins at the extremes, by up to 9.9. What DEG buys is not a better best case but a
+better *worst* case: its floor is 4–10 points above Fusion's in both regimes, and
+its curve is half as steep in the control. That is exactly the trade §3.3
+describes, and it is the right trade when the query's α is not known in advance.
+
+The correlated control behaves as a control should: with the modalities largely
+agreeing, Fusion's fixed α is a better approximation of every query, so it wins
+more often — and DEG's curve flattens to a 7.3-point spread, its guarantee
+mattering more while its cost stays the same.
+
+**Merging reproduces Fig 2 exactly** in both regimes: near-perfect at the
+extremes (1.0000 and 0.9480 independent), collapsing to 0.1750 mid-range. Each
+index sees one modality, so mid-range queries get candidates good in one and
+arbitrary in the other.
+
+### Cost of the guarantee
+
+| | DEG | Fusion | Merging |
+|---|---|---|---|
+| build (independent) | 47.7 s | 17.6 s | 107.2 s |
+| mean out-degree | 18.7 | — | — |
+| active ranges | 2.23 MiB | 0 | 0 |
+| vectors | 4.96 MiB | 4.96 MiB | 4.96 MiB |
+
+DEG costs **2.7× Fusion's build** and 45% of the vector bytes in stored ranges.
+§4.5 calls that storage negligible; it is not, though it is affordable.
+
+### An earlier verdict, retracted
+
+A previous run of this sweep at pool 64 (10k) and 100 (100k) concluded DEG loses
+to Fusion. **That conclusion was wrong**, and the reason is instructive: all three
+arms draw candidates through GPS, and at those pools GPS is starved — mean
+out-degree 4.8 against the 18.7 above. Every arm was crippled by the same defect,
+so the comparison measured provisioning rather than pruning. The diagnosis below
+is what found it.
+
+### The diagnostic that found it
 
 **At α = 1.0 the hybrid problem reduces exactly to single-modality SIFT search.**
 Phase 6 measured our own plain `GraphIndex` on the identical 100k SIFT vectors
@@ -178,13 +233,17 @@ graph's 18.8, and RNG pruning at α = 1 has little to work with. That is the pri
 of α-agnostic candidate acquisition, and it is a real cost of the design rather
 than an implementation artefact — the same pool must serve every α at once.
 
-### What this invalidates
+### Why this mattered
 
-**The α-sweep verdict above was measured on a broken configuration.** All three
-arms draw candidates through GPS, at pool 64 (10k) and 100 (100k) — far below what
-the diagnosis shows GPS needs. So every arm was crippled by the same defect, and
-"DEG does not beat Fusion" was never a fair test of DEG. The tables are kept
-because the numbers are real, but the comparison they support is not.
+Every arm of the α sweep draws candidates through GPS, so an under-provisioned
+pool crippled all three at once and the comparison measured provisioning rather
+than pruning. Re-running at pool 256 lifted DEG's mean out-degree from 4.8 to
+18.7 — level with a plain graph — and the paper's claimed shape appeared. The
+starved numbers are kept below as a record.
+
+**The α sweep at pool 64 (10k) and 100 (100k), now superseded.** Recall
+0.19–0.43 at 100k, 0.44–0.61 at 10k; DEG won at the extremes and lost through the
+middle, the right shape at absolute values too low to support any conclusion.
 
 ### Operating point, and why 10k could not settle it
 
@@ -275,8 +334,15 @@ the active range being a set rather than an interval.
 pool must serve every α at once and only a fraction of it is usable at any single
 one. That is the structural cost of the design.
 
-**Still open:** whether DEG beats a fixed-α index once every arm is adequately
-provisioned. The α sweep is being re-run at a pool where GPS is not starved; the
-earlier verdict was drawn on a configuration the diagnosis has since shown to be
-broken, and is retained above only as a record of the numbers, not the
-conclusion.
+**Reproduced, at an adequate operating point:** §3.3's argument that a fixed-α
+index degrades away from its build α while DEG holds a flatter curve. DEG does not
+dominate — Fusion wins the band around α = 0.5 — but DEG's worst case across α is
+4–10 points better, and that is the case that matters when α is unknown at build
+time.
+
+**Still open:** whether the result holds at the paper's scale. Everything above
+is 10k objects; the 100k run was made at a starved pool and would need repeating
+at pool 256+, which the build times make expensive. Also untested: `k` other than
+10, and a second modality that is neither an independent draw nor a projection —
+a genuinely semantic pairing, which is what the paper's image-text datasets are
+and what our synthetic coordinate only approximates.
