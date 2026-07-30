@@ -24,6 +24,16 @@ benchmark/datasets/*
 __pycache__/
 .venv/
 
-# Transient writes from the Claude Code settings file, occasionally caught
-# mid-write by a "git add -A".
-.claude/settings.local.json.tmp.*
+# Claude Code local state. All of it is machine-specific: the settings file
+# holds a permission allowlist naming local absolute paths, and the transient
+# .tmp.* writes are occasionally caught mid-write by a "git add -A".
+#
+# A project that wanted to share Claude configuration with contributors would
+# check in .claude/settings.json (shared) and .mcp.json (project MCP servers)
+# while ignoring settings.local.json. Nothing here needs that, so the whole
+# directory is ignored.
+.claude/
+CLAUDE.local.md
+
+# Claude Code writes plans and transcripts under the user's home directory
+# rather than the repo, so nothing else needs excluding.
