@@ -32,11 +32,15 @@
 //! more than two vectors, as the active range becomes a hyperplane", and leaves
 //! that as future work.
 
+pub mod gps;
+pub mod hybrid;
 pub mod interval;
 pub mod pareto;
 pub mod pruning;
 pub mod select;
 
+pub use gps::gps;
+pub use hybrid::HybridSet;
 pub use interval::AlphaSet;
 pub use pareto::{dominates, frontier_layers, ParetoPoint};
 pub use pruning::{prunes_at, pruned_by, solve, HybridDistance};
