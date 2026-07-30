@@ -59,6 +59,7 @@ use super::manifest::{table_filename, Manifest, RunEntry};
 use super::merge::{memtable_source, MergeIterator, Source};
 use super::shape::{FileShape, LevelShape, RunShape, TreeShape};
 use super::sstable::DEFAULT_BLOOM_FALSE_POSITIVE_RATE;
+use super::vlog::{ValueLog, ValuePointer};
 use super::{Key, MemTable, SSTable, SSTableWriter, SyncPolicy, UserValue, Value, Wal};
 
 /// Name of the active write-ahead log inside the database directory.
@@ -90,6 +91,23 @@ pub struct LsmConfig {
     /// would otherwise spin forever inside a `put`. Reaching this limit is not
     /// an error — the next flush simply continues the work.
     pub max_compactions_per_flush: usize,
+    /// Values at least this large go to the value log; the tree stores a pointer.
+    ///
+    /// `None` disables key–value separation entirely and the on-disk format is
+    /// byte-for-byte what it was before this existed.
+    ///
+    /// This is the answer to the largest finding in this project: Phase 3
+    /// measured write amplification at 22.65× for 3,840-byte values against
+    /// 3.50× for 100-byte ones, because compaction rewrites the whole entry every
+    /// time a key moves down a level. Separating values makes a value's cost
+    /// independent of how far its key travels. See [`super::vlog`] for what it
+    /// costs in exchange.
+    ///
+    /// **The setting is part of the on-disk format.** Small values still go
+    /// inline, so separated mode tags every stored value with a discriminator
+    /// byte; reopening a directory with a different setting than it was written
+    /// with will misread. A production engine would record this in the manifest.
+    pub value_log_threshold: Option<usize>,
 }
 
 impl Default for LsmConfig {
@@ -109,6 +127,10 @@ impl Default for LsmConfig {
             },
             merge: MergeKind::Leveling,
             max_compactions_per_flush: 64,
+            // Off by default: every existing measurement in `results/` was taken
+            // without it, and turning it on silently would make those numbers
+            // incomparable with new ones.
+            value_log_threshold: None,
         }
     }
 }
@@ -252,6 +274,15 @@ pub struct LsmStats {
     /// Bytes written by compaction alone — the cost the policies trade against
     /// read performance.
     pub compaction_bytes_written: u64,
+    /// Payload bytes appended to the value log. Zero unless key–value separation
+    /// is enabled.
+    ///
+    /// Counted in [`LsmStats::write_amplification`] alongside SSTable bytes, and
+    /// that is not a detail. With separation on, values never enter an SSTable,
+    /// so dividing SSTable bytes alone by user bytes would report an
+    /// amplification below 1 — an engine that wrote less than it was given.
+    /// The bytes did not vanish; they went here.
+    pub value_log_bytes_written: u64,
     pub blocks_read: u64,
     pub bloom_rejections: u64,
 }
@@ -262,7 +293,23 @@ impl LsmStats {
     /// This is the headline write-amplification figure. With no compaction it
     /// sits just above 1; leveling drives it up in exchange for fewer runs to
     /// probe on a read.
+    ///
+    /// Counts **everything written**: SSTables plus the value log. Key–value
+    /// separation moves bytes out of the tree, and a figure that ignored where
+    /// they went would flatter it by construction rather than measure it.
     pub fn write_amplification(&self) -> Option<f64> {
+        let written = self.sstable_bytes_written + self.value_log_bytes_written;
+        (self.user_bytes_written > 0).then(|| written as f64 / self.user_bytes_written as f64)
+    }
+
+    /// Write amplification counting only what the tree itself rewrote.
+    ///
+    /// The difference between this and [`write_amplification`] is exactly what
+    /// separation buys: the value log is written once per value, while SSTable
+    /// bytes are paid again at every level a key descends.
+    ///
+    /// [`write_amplification`]: LsmStats::write_amplification
+    pub fn tree_write_amplification(&self) -> Option<f64> {
         (self.user_bytes_written > 0)
             .then(|| self.sstable_bytes_written as f64 / self.user_bytes_written as f64)
     }
@@ -376,7 +423,16 @@ pub struct LsmTree {
     user_bytes_written: u64,
     sstable_bytes_written: u64,
     compaction_bytes_written: u64,
+    /// Present exactly when `config.value_log_threshold` is set.
+    vlog: Option<ValueLog>,
 }
+
+/// Tag on a stored value in separated mode: the payload follows inline.
+const VALUE_INLINE: u8 = 0x00;
+/// Tag on a stored value in separated mode: a [`ValuePointer`] follows.
+const VALUE_SEPARATED: u8 = 0x01;
+/// Filename of the value log within the database directory.
+const VALUE_LOG_FILENAME: &str = "values.log";
 
 impl LsmTree {
     /// Open (or create) a database in `dir`, recovering any existing state.
@@ -422,6 +478,13 @@ impl LsmTree {
         let growth = config.growth.build();
         let merge = config.merge.build();
 
+        // Opened after the WAL replay, so a torn value-log tail is truncated
+        // before anything can append past it — the same ordering the WAL uses.
+        let vlog = match config.value_log_threshold {
+            Some(_) => Some(ValueLog::open(dir.join(VALUE_LOG_FILENAME))?),
+            None => None,
+        };
+
         Ok(Self {
             dir,
             config,
@@ -436,6 +499,7 @@ impl LsmTree {
             user_bytes_written: 0,
             sstable_bytes_written: 0,
             compaction_bytes_written: 0,
+            vlog,
         })
     }
 
@@ -463,8 +527,83 @@ impl LsmTree {
 
     /// Insert or overwrite `key`.
     pub fn put(&mut self, key: Key, value: UserValue) -> io::Result<()> {
+        // Counted before encoding: amplification is measured against what the
+        // caller handed over, not against what the engine chose to store.
         self.user_bytes_written += (key.len() + value.len()) as u64;
-        self.write(key, Value::Put(value))
+        let stored = self.store_value(value)?;
+        self.write(key, Value::Put(stored))
+    }
+
+    /// Encode a value for the tree, diverting large payloads to the value log.
+    ///
+    /// With separation off this is the identity, so the on-disk format is
+    /// unchanged and no existing measurement shifts.
+    ///
+    /// With it on, every stored value carries a one-byte tag. Small values stay
+    /// inline — moving them would cost a second read to save nothing — so the tag
+    /// is what tells the read path which it is holding. Tagging *both* cases
+    /// rather than sniffing for a pointer-shaped prefix is deliberate: a user
+    /// value that happened to begin with the pointer tag would otherwise be
+    /// misread as an offset into the log.
+    fn store_value(&mut self, value: UserValue) -> io::Result<UserValue> {
+        let Some(threshold) = self.config.value_log_threshold else {
+            return Ok(value);
+        };
+
+        if value.len() >= threshold {
+            let vlog = self
+                .vlog
+                .as_mut()
+                .expect("a threshold implies an open value log");
+            let pointer = vlog.append(&value)?;
+            let mut stored = Vec::with_capacity(1 + ValuePointer::ENCODED_BYTES);
+            stored.push(VALUE_SEPARATED);
+            stored.extend_from_slice(&pointer.encode());
+            Ok(stored)
+        } else {
+            let mut stored = Vec::with_capacity(1 + value.len());
+            stored.push(VALUE_INLINE);
+            stored.extend_from_slice(&value);
+            Ok(stored)
+        }
+    }
+
+    /// Recover the caller's value from what the tree stored.
+    ///
+    /// The inverse of [`store_value`](Self::store_value); every path that hands a
+    /// value back to a caller goes through it.
+    fn load_value(&self, stored: UserValue) -> io::Result<UserValue> {
+        if self.config.value_log_threshold.is_none() {
+            return Ok(stored);
+        }
+
+        match stored.split_first() {
+            Some((&VALUE_INLINE, payload)) => Ok(payload.to_vec()),
+            Some((&VALUE_SEPARATED, encoded)) => {
+                let pointer = ValuePointer::decode(encoded).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("value pointer is {} bytes, expected 12", encoded.len()),
+                    )
+                })?;
+                self.vlog
+                    .as_ref()
+                    .expect("a threshold implies an open value log")
+                    .read(pointer)
+            }
+            // Either the directory was written without separation and reopened
+            // with it, or the entry is corrupt. Both are worth failing loudly
+            // for; silently returning the bytes would hand back a value with a
+            // stray tag byte glued to the front.
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "stored value has tag {:?}, which is neither inline nor a pointer — \
+                     was this database written with a different value_log_threshold?",
+                    other.map(|(tag, _)| *tag)
+                ),
+            )),
+        }
     }
 
     /// Delete `key`, writing a tombstone.
@@ -499,13 +638,16 @@ impl LsmTree {
     /// deleted; the tombstone stops the search either way.
     pub fn get(&self, key: &[u8]) -> io::Result<Option<UserValue>> {
         if let Some(value) = self.memtable.get(key) {
-            return Ok(value.as_bytes().map(<[u8]>::to_vec));
+            return match value.as_bytes() {
+                Some(bytes) => self.load_value(bytes.to_vec()).map(Some),
+                None => Ok(None),
+            };
         }
 
         for level in &self.levels {
             for run in level {
                 match run.get(key)? {
-                    Some(Value::Put(bytes)) => return Ok(Some(bytes)),
+                    Some(Value::Put(bytes)) => return self.load_value(bytes).map(Some),
                     // A tombstone is an answer: stop, and do not look deeper.
                     Some(Value::Tombstone) => return Ok(None),
                     None => continue,
@@ -534,11 +676,12 @@ impl LsmTree {
         // Safe here because this view spans *every* run: there is nothing older
         // left for a tombstone to shadow. The same reasoning does not transfer
         // to a partial compaction.
-        MergeIterator::dropping_tombstones(sources).map(|entry| {
-            entry.map(|(key, value)| match value {
-                Value::Put(bytes) => (key, bytes),
+        MergeIterator::dropping_tombstones(sources).map(move |entry| {
+            let (key, value) = entry?;
+            match value {
+                Value::Put(bytes) => Ok((key, self.load_value(bytes)?)),
                 Value::Tombstone => unreachable!("tombstones were dropped by the merge"),
-            })
+            }
         })
     }
 
@@ -570,11 +713,15 @@ impl LsmTree {
             }
         }
 
-        MergeIterator::dropping_tombstones(sources).map(|entry| {
-            entry.map(|(key, value)| match value {
-                Value::Put(bytes) => (key, bytes),
+        MergeIterator::dropping_tombstones(sources).map(move |entry| {
+            let (key, value) = entry?;
+            match value {
+                // Note the cost this hides: with separation on, a scan that
+                // reads values walks the log in *insertion* order, not key
+                // order. See `super::vlog` — it is WiscKey's known weakness.
+                Value::Put(bytes) => Ok((key, self.load_value(bytes)?)),
                 Value::Tombstone => unreachable!("tombstones were dropped by the merge"),
-            })
+            }
         })
     }
 
@@ -830,6 +977,12 @@ impl LsmTree {
     /// Force buffered log bytes to the device. A no-op under
     /// [`SyncPolicy::EveryWrite`], which has already synced.
     pub fn sync(&mut self) -> io::Result<()> {
+        // The value log first: a WAL record naming a pointer must never become
+        // durable before the payload it points at, or recovery would resolve a
+        // pointer into bytes that were never written.
+        if let Some(vlog) = self.vlog.as_mut() {
+            vlog.sync()?;
+        }
         self.wal.sync()
     }
 
@@ -842,6 +995,10 @@ impl LsmTree {
             user_bytes_written: self.user_bytes_written,
             sstable_bytes_written: self.sstable_bytes_written,
             compaction_bytes_written: self.compaction_bytes_written,
+            value_log_bytes_written: self
+                .vlog
+                .as_ref()
+                .map_or(0, super::vlog::ValueLog::payload_written),
             ..Default::default()
         };
 
@@ -2143,5 +2300,242 @@ mod tests {
 
         assert_eq!(tree.levels[0].len(), 1);
         assert_eq!(tree.get(b"a").expect("get"), Some(v("1")));
+    }
+
+    // ---- key–value separation -------------------------------------------
+
+    /// A config with separation on and a small memtable, so a short test still
+    /// drives real flushes and compactions.
+    fn separated_config(threshold: usize) -> LsmConfig {
+        LsmConfig {
+            memtable_threshold_bytes: 16 * 1024,
+            sync_policy: SyncPolicy::Manual,
+            value_log_threshold: Some(threshold),
+            growth: GrowthKind::Vertical {
+                buffer_bytes: 16 * 1024,
+                size_ratio: 4,
+            },
+            merge: MergeKind::Leveling,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_separated_value_round_trips() {
+        let dir = TempDir::new("kv-roundtrip");
+        let mut tree = LsmTree::open(&dir.path, separated_config(64)).expect("open");
+        let big = vec![7u8; 4096];
+        tree.put(k("big"), big.clone()).expect("put");
+        assert_eq!(tree.get(b"big").expect("get"), Some(big));
+    }
+
+    #[test]
+    fn a_value_below_the_threshold_stays_inline_and_still_reads_back() {
+        let dir = TempDir::new("kv-inline");
+        let mut tree = LsmTree::open(&dir.path, separated_config(1024)).expect("open");
+        tree.put(k("small"), v("tiny")).expect("put");
+        assert_eq!(tree.get(b"small").expect("get"), Some(v("tiny")));
+        // Nothing reached the log, so its payload counter is untouched.
+        assert_eq!(tree.stats().value_log_bytes_written, 0);
+    }
+
+    #[test]
+    fn separation_survives_flushes_and_compaction() {
+        // A much smaller memtable than the other tests use, and the reason is
+        // the feature itself: with values diverted, an entry costs a ~7-byte key
+        // plus a 13-byte tagged pointer, so 200 keys occupy about 4 KB of tree.
+        // At the usual 16 KiB threshold nothing would ever flush and this test
+        // would silently check nothing.
+        let dir = TempDir::new("kv-compact");
+        let config = LsmConfig {
+            memtable_threshold_bytes: 1024,
+            growth: GrowthKind::Vertical {
+                buffer_bytes: 1024,
+                size_ratio: 4,
+            },
+            ..separated_config(64)
+        };
+        let mut tree = LsmTree::open(&dir.path, config).expect("open");
+        let values: Vec<Vec<u8>> = (0..200u32)
+            .map(|i| vec![(i % 251) as u8; 512 + (i as usize % 64)])
+            .collect();
+        for (i, value) in values.iter().enumerate() {
+            tree.put(k(&format!("key{i:04}")), value.clone())
+                .expect("put");
+        }
+        tree.flush().expect("flush");
+        tree.compact_until_quiet().expect("compact");
+
+        assert!(tree.stats().compaction_count > 0, "test needs compactions");
+        for (i, value) in values.iter().enumerate() {
+            assert_eq!(
+                tree.get(format!("key{i:04}").as_bytes()).expect("get"),
+                Some(value.clone()),
+                "key{i:04} came back wrong after compaction"
+            );
+        }
+    }
+
+    #[test]
+    fn separated_values_survive_a_reopen() {
+        let dir = TempDir::new("kv-reopen");
+        let value = vec![3u8; 2048];
+        {
+            let mut tree = LsmTree::open(&dir.path, separated_config(64)).expect("open");
+            tree.put(k("persisted"), value.clone()).expect("put");
+            tree.sync().expect("sync");
+        }
+        let tree = LsmTree::open(&dir.path, separated_config(64)).expect("reopen");
+        assert_eq!(tree.get(b"persisted").expect("get"), Some(value));
+    }
+
+    #[test]
+    fn overwriting_and_deleting_a_separated_value_behaves() {
+        let dir = TempDir::new("kv-overwrite");
+        let mut tree = LsmTree::open(&dir.path, separated_config(64)).expect("open");
+        tree.put(k("x"), vec![1u8; 512]).expect("put");
+        tree.put(k("x"), vec![2u8; 512]).expect("overwrite");
+        assert_eq!(tree.get(b"x").expect("get"), Some(vec![2u8; 512]));
+
+        tree.delete(k("x")).expect("delete");
+        assert_eq!(tree.get(b"x").expect("get"), None);
+    }
+
+    #[test]
+    fn scans_resolve_separated_values() {
+        // `iter` and `range_from` go through a different path than `get`, so
+        // both need their own check that pointers are resolved.
+        let dir = TempDir::new("kv-scan");
+        let mut tree = LsmTree::open(&dir.path, separated_config(64)).expect("open");
+        for i in 0..50u32 {
+            tree.put(k(&format!("key{i:03}")), vec![i as u8; 256])
+                .expect("put");
+        }
+        tree.flush().expect("flush");
+
+        let all: Vec<(Key, UserValue)> = tree.iter().collect::<io::Result<_>>().expect("iter");
+        assert_eq!(all.len(), 50);
+        for (i, (_, value)) in all.iter().enumerate() {
+            assert_eq!(value, &vec![i as u8; 256], "iter value {i}");
+        }
+
+        let tail: Vec<(Key, UserValue)> = tree
+            .range_from(b"key025")
+            .collect::<io::Result<_>>()
+            .expect("range");
+        assert_eq!(tail.len(), 25);
+        assert_eq!(tail[0].1, vec![25u8; 256]);
+    }
+
+    #[test]
+    fn mixed_sizes_round_trip_together() {
+        // Both branches of the tag, interleaved, so a mix-up between them shows.
+        let dir = TempDir::new("kv-mixed");
+        let mut tree = LsmTree::open(&dir.path, separated_config(256)).expect("open");
+        for i in 0..100u32 {
+            let size = if i % 2 == 0 { 16 } else { 1024 };
+            tree.put(k(&format!("key{i:03}")), vec![i as u8; size])
+                .expect("put");
+        }
+        tree.flush().expect("flush");
+        tree.compact_until_quiet().expect("compact");
+
+        for i in 0..100u32 {
+            let size = if i % 2 == 0 { 16 } else { 1024 };
+            assert_eq!(
+                tree.get(format!("key{i:03}").as_bytes()).expect("get"),
+                Some(vec![i as u8; size]),
+                "key{i:03}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_whose_first_byte_looks_like_a_pointer_tag_is_not_misread() {
+        // Why both branches carry a tag rather than only the separated one: this
+        // value begins with the pointer tag, and must still come back intact.
+        let dir = TempDir::new("kv-ambiguous");
+        let mut tree = LsmTree::open(&dir.path, separated_config(4096)).expect("open");
+        let tricky = vec![VALUE_SEPARATED; 32];
+        tree.put(k("tricky"), tricky.clone()).expect("put");
+        assert_eq!(tree.get(b"tricky").expect("get"), Some(tricky));
+    }
+
+    #[test]
+    fn write_amplification_counts_the_value_log() {
+        // The accounting that makes the headline number honest. With values
+        // diverted out of the tree, dividing SSTable bytes alone by user bytes
+        // would report an engine writing *less* than it was handed.
+        let dir = TempDir::new("kv-accounting");
+        let mut tree = LsmTree::open(&dir.path, separated_config(64)).expect("open");
+        for i in 0..300u32 {
+            tree.put(k(&format!("key{i:04}")), vec![(i % 251) as u8; 1024])
+                .expect("put");
+        }
+        tree.flush().expect("flush");
+        tree.compact_until_quiet().expect("compact");
+
+        let stats = tree.stats();
+        assert!(
+            stats.value_log_bytes_written > 0,
+            "values should be diverted"
+        );
+
+        let total = stats.write_amplification().expect("wa");
+        let tree_only = stats.tree_write_amplification().expect("tree wa");
+        assert!(
+            total >= 1.0,
+            "total amplification cannot be below 1: got {total:.3}"
+        );
+        assert!(
+            tree_only < total,
+            "the tree alone ({tree_only:.3}) must be cheaper than the total ({total:.3}) — \
+             that gap is what separation buys"
+        );
+    }
+
+    /// The result this whole feature exists for.
+    #[test]
+    fn separation_cuts_write_amplification_at_vector_sizes() {
+        // 3,840 bytes is a GIST vector — the size at which Phase 3 measured
+        // 22.65× amplification without separation.
+        const VALUE_BYTES: usize = 3840;
+        const KEYS: u32 = 400;
+
+        fn run(threshold: Option<usize>, label: &str) -> f64 {
+            let dir = TempDir::new(label);
+            let config = LsmConfig {
+                value_log_threshold: threshold,
+                ..separated_config(64)
+            };
+            let mut tree = LsmTree::open(&dir.path, config).expect("open");
+            for i in 0..KEYS {
+                tree.put(k(&format!("key{i:05}")), vec![(i % 251) as u8; VALUE_BYTES])
+                    .expect("put");
+            }
+            tree.flush().expect("flush");
+            tree.compact_until_quiet().expect("compact");
+            // Read one back, so a configuration that amplifies less by simply
+            // losing data cannot pass.
+            assert_eq!(
+                tree.get(b"key00007").expect("get"),
+                Some(vec![7u8; VALUE_BYTES])
+            );
+            tree.stats().write_amplification().expect("wa")
+        }
+
+        let without = run(None, "kv-wa-off");
+        let with = run(Some(64), "kv-wa-on");
+
+        assert!(
+            with < without,
+            "separation should reduce amplification at {VALUE_BYTES} B: \
+             {with:.2}× with, {without:.2}× without"
+        );
+        assert!(
+            with < without / 2.0,
+            "expected a substantial cut, not a marginal one: \
+             {with:.2}× with against {without:.2}× without"
+        );
     }
 }

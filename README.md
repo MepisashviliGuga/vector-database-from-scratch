@@ -21,7 +21,7 @@ scalar. Nothing is estimated or copied from a paper.
 | **SIFT1M, end to end** | **recall@10 0.9870** at 13.4 ms/query — the index alone reaches 0.9420 |
 | **Quantization** | 95.8% recall@10 at **6.4× compression**, 5.84 ms/query against brute force's 62 ms |
 | **Graph index, 100k** | recall@10 **0.9990** at 938 QPS — **14× brute force**, and the margin widens with scale |
-| **Storage** | vector-sized values cost **22.65× write amplification** against 3.50× for the ~100 B values compaction research benchmarks on |
+| **Storage** | vector-sized values cost **19.8× write amplification** against 4.9× for the ~100 B values compaction research benchmarks on — **cut to 1.00× by key–value separation** |
 | **Durability** | 5,000 acknowledged writes survive `abort()` mid-stream with zero loss or corruption |
 
 Three results worth more than the headline figures:
@@ -32,11 +32,15 @@ Three results worth more than the headline figures:
   back from the LSM-tree reaches **0.9870 at no measurable added latency**, because
   re-ranking removes *ordering* errors entirely and leaves only the failure to
   *propose*. This is why the project needs a storage engine and not a `Vec<Vec<f32>>`.
-- **Value size dominates every compaction policy.** Write amplification runs
-  3.50× → 7.86× → **22.65×** as values grow 100 B → 512 B → 3,840 B, and p99
-  latency rises 360×. The source papers benchmark ~100 B values; at vector sizes,
-  key–value separation matters more than any growth scheme or merge policy they
-  compare.
+- **Value size dominates every compaction policy — and the fix isn't in any of the
+  papers.** Write amplification runs 4.92× → 7.95× → **19.84×** as values grow
+  100 B → 512 B → 3,840 B, because compaction rewrites the whole entry every time
+  a key descends a level. The source papers all benchmark ~100 B values, where
+  this is invisible. Implementing key–value separation
+  ([`results/kv_separation.md`](results/kv_separation.md)) collapses it to
+  **1.00× — the theoretical floor** — with the tree itself rewriting just 1% of
+  the user bytes. It is not free: reads cost 2.5× more and space 1.6× more, and
+  both were measured rather than assumed.
 - **A reproduction that failed, then didn't.** Paper 05's claim did not reproduce
   at first. Isolating why — by swapping one component at a time against a known-good
   baseline — showed my own configuration had starved the candidate search, not that
@@ -64,6 +68,7 @@ Full write-ups: [storage](results/README.md) · [ANN](results/ann_recall.md) ·
 | 5 | **SymphonyQG** (paper 04) | done — reproduced, and measurably *not* worth it without SIMD |
 | 6 | Integration: `VectorStore`, recall@k vs QPS across all four indexes | done — [results](results/end_to_end.md) |
 | 7 | **DEG** hybrid vector search (paper 05) | done — [results](results/deg.md) |
+| — | **Key–value separation** (WiscKey-style value log) — not from any source paper, motivated by the Phase 3 finding | done — [results](results/kv_separation.md) |
 | 7 | RusKey RL compaction (paper 06), Zombie Hashing | not started |
 
 ## Architecture
@@ -124,6 +129,7 @@ first — and stop at the first entry found for the key, **including a tombstone
 | `src/storage/shape.rs` | Read-only view of the tree, shared by both axes |
 | `src/storage/growth/` | Axis 1 — *when* to compact: `vertical`, `horizontal`, `horizontal_tiering`, `vertiorizon`, `ecotune_scheme` |
 | `src/storage/compaction/` | Axis 2 — *how* to merge: `leveling`, `tiering`, `ecotune` (the DP) |
+| `src/storage/vlog.rs` | Key–value separation: append-only value log, so compaction rewrites pointers rather than payloads |
 | `src/storage/lsm.rs` | The tree: flush pipeline, multi-run read path, compaction, recovery |
 
 ### ANN layer
@@ -153,6 +159,7 @@ cargo run --release --example bloom_stats         # what the bloom filter buys
 cargo run --release --example crash_recovery      # kill a process, verify durability
 cargo run --release --example storage_bench       # the Phase 3 sweep
 cargo run --release --example ecotune_schedule    # what EcoTune's DP decides
+cargo run --release --example kv_separation       # 19.8x write amplification -> 1.00x
 
 # ANN. Fetch a dataset first: benchmark/datasets/fetch.sh siftsmall
 cargo run --release --example ann_groundtruth     # validate the oracle
