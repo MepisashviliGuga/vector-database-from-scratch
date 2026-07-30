@@ -70,6 +70,36 @@ impl PruningPolicy {
     }
 }
 
+/// Where candidate neighbours come from at build time.
+///
+/// Exists to isolate a measured defect, not as a tuning knob: the α sweep in
+/// `results/deg.md` found the hybrid graphs reaching a third of the recall a
+/// plain [`GraphIndex`](crate::ann::graph::GraphIndex) gets on the same vectors
+/// at α = 1, where the two solve an identical problem. Swapping one component at
+/// a time is what identifies the cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateSource {
+    /// Algorithm 1. Expands along Pareto frontier layers, which is what lets one
+    /// candidate set serve every α.
+    Gps,
+    /// Ordinary greedy beam search at the policy's fixed α — what every
+    /// single-metric graph index does.
+    ///
+    /// Only meaningful for [`PruningPolicy::Fixed`] and
+    /// [`PruningPolicy::SingleModality`]; [`PruningPolicy::Dynamic`] has no single
+    /// α to search at, which is the whole reason GPS exists.
+    Beam,
+}
+
+/// Where a search starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryPolicy {
+    /// §4.4's edge seeds: the nodes *farthest* from the centroid.
+    EdgeSeeds,
+    /// A single interior vertex, as an ordinary graph index uses.
+    Interior,
+}
+
 /// Build parameters.
 #[derive(Debug, Clone, Copy)]
 pub struct DegConfig {
@@ -83,6 +113,8 @@ pub struct DegConfig {
     /// How many edge seeds to keep.
     pub max_seeds: usize,
     pub policy: PruningPolicy,
+    pub candidates: CandidateSource,
+    pub entry: EntryPolicy,
 }
 
 impl Default for DegConfig {
@@ -94,6 +126,8 @@ impl Default for DegConfig {
             min_active_width: 0.05,
             max_seeds: 16,
             policy: PruningPolicy::Dynamic,
+            candidates: CandidateSource::Gps,
+            entry: EntryPolicy::EdgeSeeds,
         }
     }
 }
@@ -119,18 +153,28 @@ impl DegIndex {
         };
 
         for id in 1..count {
-            // Candidates from the graph so far. GPS runs before insertion, so
-            // `id` is not reachable and cannot dominate its own frontier.
-            let seeds = index.seeds.clone();
-            let layers = super::gps::gps(
-                &seeds,
-                config.build_pool,
-                id,
-                |other| index.set.distance(id, other as usize),
-                |vertex, out| {
-                    out.extend(index.adjacency[vertex as usize].iter().map(|e| e.target));
-                },
-            );
+            // Candidates from the graph so far. Both sources run before
+            // insertion, so `id` is not reachable and cannot dominate its own
+            // frontier.
+            let entries = index.entry_points();
+            let layers = match config.candidates {
+                CandidateSource::Gps => super::gps::gps(
+                    &entries,
+                    config.build_pool,
+                    id,
+                    |other| index.set.distance(id, other as usize),
+                    |vertex, out| {
+                        out.extend(index.adjacency[vertex as usize].iter().map(|e| e.target));
+                    },
+                ),
+                CandidateSource::Beam => {
+                    let alpha = config.policy.build_alpha().expect(
+                        "CandidateSource::Beam needs a fixed-α policy; \
+                         Dynamic has no single α to search at",
+                    );
+                    vec![index.beam_candidates(id, alpha, config.build_pool, &entries)]
+                }
+            };
 
             let edges = index.select(id, &layers);
             index.adjacency[id] = edges.clone();
@@ -211,6 +255,88 @@ impl DegIndex {
             })
             .sum();
         (self.set.data_bytes(), edges)
+    }
+
+    /// The vertices a search starts from, per [`EntryPolicy`].
+    fn entry_points(&self) -> Vec<u32> {
+        match self.config.entry {
+            EntryPolicy::EdgeSeeds => self.seeds.clone(),
+            EntryPolicy::Interior => vec![0],
+        }
+    }
+
+    /// Ordinary greedy beam search over the partially built graph at one α,
+    /// returning the beam nearest-first as a single candidate layer.
+    ///
+    /// This is deliberately the same shape as
+    /// `GraphIndex::search_internal` — a min-heap frontier, a bounded max-heap of
+    /// results, and a `limit` bounding which vertices exist — so that when it
+    /// replaces GPS the *only* thing that changed is how candidates are found.
+    fn beam_candidates(
+        &self,
+        inserting: usize,
+        alpha: f32,
+        beam: usize,
+        entries: &[u32],
+    ) -> Vec<ParetoPoint> {
+        let beam = beam.max(1);
+        let limit = inserting;
+        let mut visited: HashSet<u32> = HashSet::new();
+        let mut frontier: BinaryHeap<Reverse<Neighbor>> = BinaryHeap::new();
+        let mut results: BinaryHeap<Neighbor> = BinaryHeap::new();
+
+        for &entry in entries {
+            if (entry as usize) >= limit || !visited.insert(entry) {
+                continue;
+            }
+            let start = Neighbor {
+                id: entry as u64,
+                distance: self.set.distance(inserting, entry as usize).at(alpha),
+            };
+            frontier.push(Reverse(start));
+            results.push(start);
+        }
+        while results.len() > beam {
+            results.pop();
+        }
+
+        while let Some(Reverse(current)) = frontier.pop() {
+            if let Some(worst) = results.peek() {
+                if results.len() >= beam && current.distance > worst.distance {
+                    break;
+                }
+            }
+            for edge in &self.adjacency[current.id as usize] {
+                let target = edge.target as usize;
+                if target >= limit || !visited.insert(edge.target) {
+                    continue;
+                }
+                let candidate = Neighbor {
+                    id: edge.target as u64,
+                    distance: self.set.distance(inserting, target).at(alpha),
+                };
+                let worst = results.peek().map_or(f32::INFINITY, |n| n.distance);
+                if results.len() < beam || candidate.distance < worst {
+                    frontier.push(Reverse(candidate));
+                    results.push(candidate);
+                    if results.len() > beam {
+                        results.pop();
+                    }
+                }
+            }
+        }
+
+        let mut ordered = results.into_vec();
+        ordered.sort_unstable();
+        ordered
+            .into_iter()
+            .map(|n| {
+                ParetoPoint::new(
+                    n.id as u32,
+                    self.set.distance(inserting, n.id as usize),
+                )
+            })
+            .collect()
     }
 
     /// Turn candidate layers into edges, per the configured policy.
@@ -392,8 +518,8 @@ impl DegIndex {
         let mut frontier: BinaryHeap<Reverse<Neighbor>> = BinaryHeap::new();
         let mut results: BinaryHeap<Neighbor> = BinaryHeap::new();
 
-        for &seed in &self.seeds {
-            if !visited.insert(seed) {
+        for &seed in self.entry_points().iter() {
+            if (seed as usize) >= self.adjacency.len() || !visited.insert(seed) {
                 continue;
             }
             let entry = Neighbor {

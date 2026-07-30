@@ -41,7 +41,7 @@ pub mod pruning;
 pub mod select;
 
 pub use gps::gps;
-pub use graph::{DegConfig, DegIndex, PruningPolicy};
+pub use graph::{CandidateSource, DegConfig, DegIndex, EntryPolicy, PruningPolicy};
 pub use hybrid::HybridSet;
 pub use interval::AlphaSet;
 pub use pareto::{dominates, frontier_layers, ParetoPoint};

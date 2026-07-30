@@ -141,20 +141,50 @@ recall. So this is not "hybrid search is intrinsically harder". The hybrid
 construction is producing badly connected graphs, and every conclusion about DEG
 versus Fusion is drawn on top of that defect.
 
-Two suspects, neither yet isolated:
+### Isolated: GPS was under-provisioned, and §4.4 is exonerated
 
-1. **GPS as the candidate generator.** It returns Pareto *layers*, which for an
-   independent second modality are full of objects far in `δe` but close in `δs`.
-   Its greedy step expands the nearest *layer*, which is not the same as
-   descending toward the query in the metric the search will use. A candidate pool
-   selected this way may simply contain few good `δe` neighbours.
-2. **Edge seeds (§4.4).** Every search starts from nodes deliberately *farthest*
-   from the centroid. At 100k the graph diameter is larger and much of the beam is
-   spent travelling inward. A plain graph starts from an arbitrary interior vertex.
+`cargo run --release --example deg_diagnosis` swaps one component at a time, all
+at α = 1 on the Fusion policy — the arm a plain graph should exactly match, since
+it prunes with the plain RNG rule at one α and marks every edge always-active.
+10k objects, beam 80:
 
-The honest summary of scale: the hybrid graphs need roughly **10× the beam** a
-plain graph needs for comparable recall, and that ratio is the defect, not a
-property of the problem.
+| arm | recall@10 | mean out-degree | build |
+|---|---|---|---|
+| `GraphIndex` (reference) | 1.0000 | 18.8 | 1.1 s |
+| GPS + edge seeds, pool 64 | 0.6320 | 4.8 | 1.6 s |
+| GPS + interior entry, pool 64 | 0.5150 | 4.4 | 3.8 s |
+| GPS + edge seeds, pool 256 | 0.9730 | 7.8 | 21.6 s |
+| GPS + edge seeds, pool 1024 | **0.9980** | 9.9 | **528.2 s** |
+| beam + edge seeds, pool 64 | 0.9920 | 7.8 | 5.0 s |
+| beam + interior entry, pool 64 | 0.9930 | 7.8 | 5.6 s |
+
+**The candidate source is the cause; the entry policy is not.** Replacing GPS with
+an ordinary beam search moves recall from 0.632 to 0.992 with everything else
+held fixed. Switching entry points moves it by a fraction of that, and in the
+*opposite* direction to the suspicion — §4.4's edge seeds beat an interior entry
+point (0.632 against 0.515), so the paper's seeding is fine and the earlier
+suspicion of it was wrong.
+
+**GPS is under-provisioned rather than wrong.** Given a large enough pool it
+reaches 0.998, edging out the plain graph. The cost is the finding:
+
+- **16× the candidate pool** to beat a beam search, and
+- **106× the build time** — 528 s against 5.0 s — for 0.6 points of recall.
+
+The mechanism is visible in the out-degree column. A Pareto pool is spread along
+the whole `(δe, δs)` trade-off curve, so only a fraction of it is usable at any
+one α; at pool 64 that fraction yields 4.8 edges per vertex against a plain
+graph's 18.8, and RNG pruning at α = 1 has little to work with. That is the price
+of α-agnostic candidate acquisition, and it is a real cost of the design rather
+than an implementation artefact — the same pool must serve every α at once.
+
+### What this invalidates
+
+**The α-sweep verdict above was measured on a broken configuration.** All three
+arms draw candidates through GPS, at pool 64 (10k) and 100 (100k) — far below what
+the diagnosis shows GPS needs. So every arm was crippled by the same defect, and
+"DEG does not beat Fusion" was never a fair test of DEG. The tables are kept
+because the numbers are real, but the comparison they support is not.
 
 ### Operating point, and why 10k could not settle it
 
@@ -231,16 +261,22 @@ Ins-SG and Twitter-US pair text embeddings with geographic coordinates at `m = 2
 
 ## Status
 
-Faithful and verified: the α algebra, Pareto frontiers and Theorem 4.1,
-Algorithm 2's selection, the §4.5 early exit, the metric premise.
+**Faithful and verified:** the α algebra (pinned to Table 1 and cross-checked
+against the raw inequalities), Pareto frontiers and Theorem 4.1, Algorithm 2's
+selection, the §4.5 early exit, the §3.2 metric premise, and — via the diagnosis
+— Algorithm 1 and §4.4's edge seeds, both of which behave correctly once GPS is
+given an adequate pool.
 
-Implemented but not validated end to end: Algorithm 1 (GPS), Algorithm 3's build,
-§4.4's edge seeds. The α-sweep shows the composition under-performing a plain
-single-modality graph on the same vectors, so the claim DEG makes is untested
-here rather than confirmed or refuted.
+**Corrected in the paper:** Case 4's boundary, the uncovered `B = 0` case, and
+the active range being a set rather than an interval.
 
-Next step to settle it: measure DEG's recall at α = 1 against `GraphIndex` on
-identical vectors while swapping one component at a time — first the seeds
-(edge seeds versus an interior entry point), then the candidate generator (GPS
-versus ordinary beam search). Whichever swap closes the gap identifies the
-defect.
+**Measured and worth carrying forward:** GPS needs 16× the candidate pool and
+~100× the build time of an ordinary beam search to match it, because a Pareto
+pool must serve every α at once and only a fraction of it is usable at any single
+one. That is the structural cost of the design.
+
+**Still open:** whether DEG beats a fixed-α index once every arm is adequately
+provisioned. The α sweep is being re-run at a pool where GPS is not starved; the
+earlier verdict was drawn on a configuration the diagnosis has since shown to be
+broken, and is retained above only as a record of the numbers, not the
+conclusion.
