@@ -23,3 +23,7 @@ benchmark/datasets/*
 .ipynb_checkpoints/
 __pycache__/
 .venv/
+
+# Transient writes from the Claude Code settings file, occasionally caught
+# mid-write by a "git add -A".
+.claude/settings.local.json.tmp.*
